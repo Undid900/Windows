@@ -1,4 +1,4 @@
-name: 平衡型-AMD
+name: 平衡型-ARM
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     
     steps:
       - name: 系统初始状态
@@ -157,4 +157,4 @@ jobs:
               echo "============================================="
               echo "运行了 ${DURATION_MINUTES} 分钟，现在退出"
               echo ""
-              break
+              bre
