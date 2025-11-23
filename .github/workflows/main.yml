@@ -1,4 +1,4 @@
-name: 平衡型-Windows-远程连接
+name: 平衡型-Windows-远程连接-修复版
 
 on:
   workflow_dispatch:
@@ -25,10 +25,10 @@ jobs:
           Write-Host "初始系统状态"
           Write-Host "============================================="
           Write-Host "内存信息："
-          systeminfo | findstr "物理内存"
+          systeminfo | findstr /C:"物理内存" || echo "无法获取详细内存信息"
           Write-Host ""
           Write-Host "磁盘信息："
-          Get-PSDrive C
+          Get-PSDrive C | Format-Table Name, @{Name="Used(GB)"; Expression={[math]::Round($_.Used/1GB, 2)}}, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB, 2)}} -AutoSize
           Write-Host ""
           
       - name: 删除不需要的软件和文件
@@ -41,26 +41,24 @@ jobs:
           $BeforeSpace = (Get-PSDrive C).Free
           Write-Host "清理前可用空间: $([math]::Round($BeforeSpace/1GB, 2)) GB"
           
-          # 清理临时文件
-          Write-Host "清理临时文件..."
-          Remove-Item -Path "$env:TEMP\*" -Force -Recurse -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Windows\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
-          
-          # 清理软件包缓存
-          Write-Host "清理软件包缓存..."
-          Remove-Item -Path "$env:USERPROFILE\AppData\Local\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
-          
-          # 清理NuGet缓存
-          Write-Host "清理NuGet缓存..."
-          Remove-Item -Path "$env:USERPROFILE\.nuget\packages\*" -Force -Recurse -ErrorAction SilentlyContinue 2>$null
-          
-          # 清理Docker镜像
-          Write-Host "清理Docker镜像..."
-          docker system prune -a -f 2>$null
-          
-          # 运行磁盘清理
-          Write-Host "运行磁盘清理..."
-          CleanMgr /sagerun:1 | Out-Null
+          try {
+              # 清理临时文件
+              Write-Host "清理临时文件..."
+              Remove-Item -Path "$env:TEMP\*" -Force -Recurse -ErrorAction SilentlyContinue
+              Remove-Item -Path "C:\Windows\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
+              
+              # 清理软件包缓存
+              Write-Host "清理软件包缓存..."
+              Remove-Item -Path "$env:USERPROFILE\AppData\Local\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
+              
+              # 清理Docker镜像
+              Write-Host "清理Docker镜像..."
+              docker system prune -a -f 2>$null
+              
+              Write-Host "清理完成"
+          } catch {
+              Write-Host "清理过程中出现警告，但继续执行: $($_.Exception.Message)"
+          }
           
           # 获取清理后空间
           $AfterSpace = (Get-PSDrive C).Free
@@ -76,28 +74,46 @@ jobs:
           
           # 设置远程桌面密码
           $password = "${{ inputs.rdp_password }}"
-          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
           
-          # 启用管理员账户
-          Write-Host "启用管理员账户..."
-          net user administrator /active:yes
-          net user administrator $password
-          
-          # 启用远程桌面
-          Write-Host "启用远程桌面..."
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1
-          
-          # 配置防火墙允许RDP
-          Write-Host "配置防火墙..."
-          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+          try {
+              # 启用远程桌面
+              Write-Host "启用远程桌面服务..."
+              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -ErrorAction Stop
+              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1 -ErrorAction Stop
+              
+              # 配置防火墙允许RDP
+              Write-Host "配置防火墙规则..."
+              netsh advfirewall firewall set rule group="remote desktop" new enable=Yes 2>$null
+              
+              # 设置当前用户密码（使用更安全的方式）
+              Write-Host "设置当前用户密码..."
+              $computer = [ADSI]"WinNT://$env:COMPUTERNAME"
+              $user = $computer.Children | Where-Object { $_.SchemaClassName -eq 'User' -and $_.Name -eq $env:USERNAME }
+              if ($user) {
+                  $user.SetPassword($password)
+                  $user.CommitChanges()
+                  Write-Host "当前用户密码设置成功"
+              }
+              
+              Write-Host "远程桌面配置完成"
+          } catch {
+              Write-Host "配置过程中出现错误: $($_.Exception.Message)"
+              Write-Host "尝试备用配置方案..."
+              
+              # 备用方案：使用net命令
+              netsh advfirewall firewall add rule name="Open RDP Port 3389" dir=in action=allow protocol=TCP localport=3389 2>$null
+          }
           
           # 获取IP信息
-          $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -like "*Ethernet*"} | Select-Object -First 1).IPAddress
+          $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -like "10.*" -or $_.IPAddress -like "172.*" -or $_.IPAddress -like "192.168.*"} | Select-Object -First 1).IPAddress
+          if (-not $ipAddress) {
+              $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "*Loopback*"} | Select-Object -First 1).IPAddress
+          }
+          
           Write-Host "远程桌面连接信息："
           Write-Host "IP地址: $ipAddress"
-          Write-Host "用户名: administrator"
-          Write-Host "密码: $password"
+          Write-Host "用户名: $env:USERNAME"
+          Write-Host "密码: [您设置的密码]"
           Write-Host "端口: 3389"
           
       - name: 检出代码仓库
@@ -110,30 +126,34 @@ jobs:
           Write-Host "============================================="
           Write-Host ""
           Write-Host "📊 磁盘状态："
-          Get-PSDrive C | Format-Table Name, Used, Free, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB, 2)}}, @{Name="Total(GB)"; Expression={[math]::Round($_.Used/1GB + $_.Free/1GB, 2)}}
+          Get-PSDrive C | Format-Table Name, @{Name="Used(GB)"; Expression={[math]::Round($_.Used/1GB, 2)}}, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB, 2)}}, @{Name="Total(GB)"; Expression={[math]::Round(($_.Used + $_.Free)/1GB, 2)}} -AutoSize
           Write-Host ""
           Write-Host "🧠 内存信息："
-          systeminfo | findstr "物理内存"
+          systeminfo | findstr /C:"物理内存" || Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory | Format-Table -AutoSize
           Write-Host ""
           
           # 显示连接信息
-          $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -like "*Ethernet*"} | Select-Object -First 1).IPAddress
+          $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -like "10.*" -or $_.IPAddress -like "172.*" -or $_.IPAddress -like "192.168.*"} | Select-Object -First 1).IPAddress
+          if (-not $ipAddress) {
+              $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "*Loopback*"} | Select-Object -First 1).IPAddress
+          }
+          
           Write-Host "🔗 远程桌面连接信息："
           Write-Host "IP地址: $ipAddress"
-          Write-Host "用户名: administrator"
+          Write-Host "用户名: $env:USERNAME"
           Write-Host "端口: 3389"
           Write-Host "============================================="
           
       - name: 安装并启动应用
         run: |
           if (Test-Path "start.bat") {
-            Write-Host "正在启动应用..."
-            Start-Process -FilePath "start.bat" -WindowStyle Normal
+              Write-Host "正在启动应用..."
+              Start-Process -FilePath "start.bat" -WindowStyle Normal
           } elseif (Test-Path "start.ps1") {
-            Write-Host "正在启动PowerShell应用..."
-            Start-Process -FilePath "powershell" -ArgumentList "-File start.ps1" -WindowStyle Normal
+              Write-Host "正在启动PowerShell应用..."
+              Start-Process -FilePath "powershell" -ArgumentList "-File start.ps1" -WindowStyle Normal
           } else {
-            Write-Host "警告：未找到 start.bat 或 start.ps1 文件，跳过应用启动"
+              Write-Host "信息：未找到 start.bat 或 start.ps1 文件，跳过应用启动"
           }
           
       - name: 保持工作流运行并提供远程连接
@@ -149,52 +169,68 @@ jobs:
           Write-Host ""
           
           # 确保远程桌面服务运行
-          Write-Host "启动远程桌面服务..."
-          Start-Service -Name "TermService" -ErrorAction SilentlyContinue
-          Start-Service -Name "UmRdpService" -ErrorAction SilentlyContinue
+          try {
+              Write-Host "启动远程桌面服务..."
+              Start-Service -Name "TermService" -ErrorAction Stop
+              Start-Service -Name "UmRdpService" -ErrorAction SilentlyContinue
+              Write-Host "远程桌面服务启动成功"
+          } catch {
+              Write-Host "远程桌面服务启动警告: $($_.Exception.Message)"
+          }
           
           $StartTime = Get-Date
           $EndTime = $StartTime.AddMinutes($DurationMinutes)
           $Iteration = 0
           
           while ($true) {
-            $Iteration++
-            $CurrentTime = Get-Date
-            $Elapsed = ($CurrentTime - $StartTime).TotalSeconds
-            $Remaining = ($EndTime - $CurrentTime).TotalSeconds
+              $Iteration++
+              $CurrentTime = Get-Date
+              $Elapsed = ($CurrentTime - $StartTime).TotalSeconds
+              $Remaining = ($EndTime - $CurrentTime).TotalSeconds
             
-            if ($Remaining -le 0) {
-                Write-Host "============================================="
-                Write-Host "⏰ 已达到设置的运行时长"
-                Write-Host "============================================="
-                Write-Host "运行了 $DurationMinutes 分钟，现在退出"
-                break
-            }
+              if ($Remaining -le 0) {
+                  Write-Host "============================================="
+                  Write-Host "⏰ 已达到设置的运行时长"
+                  Write-Host "============================================="
+                  Write-Host "运行了 $DurationMinutes 分钟，现在退出"
+                  break
+              }
             
-            $MinutesRemaining = [math]::Round($Remaining / 60, 1)
-            Write-Host "[迭代 $Iteration] 已运行: $([math]::Round($Elapsed/60, 1)) 分钟, 剩余: $MinutesRemaining 分钟"
+              $MinutesRemaining = [math]::Round($Remaining / 60, 1)
+              $MinutesElapsed = [math]::Round($Elapsed / 60, 1)
+              Write-Host "[迭代 $Iteration] 已运行: $MinutesElapsed 分钟, 剩余: $MinutesRemaining 分钟"
             
-            # 检查远程桌面服务状态
-            $TermService = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
-            if ($TermService.Status -ne "Running") {
-                Write-Host "重新启动远程桌面服务..."
-                Start-Service -Name "TermService"
-            }
+              # 定期检查服务状态（每5次迭代检查一次）
+              if ($Iteration % 5 -eq 0) {
+                  $TermService = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
+                  if ($TermService.Status -ne "Running") {
+                      Write-Host "重新启动远程桌面服务..."
+                      Start-Service -Name "TermService" -ErrorAction SilentlyContinue
+                  }
+              }
             
-            Start-Sleep -Seconds 30
+              Start-Sleep -Seconds 30
           }
           
-      - name: 清理和关闭远程桌面
+      - name: 安全清理
         if: always()
         run: |
           Write-Host "============================================="
-          Write-Host "🧹 清理阶段"
+          Write-Host "🧹 安全清理阶段"
           Write-Host "============================================="
           
-          Write-Host "禁用远程桌面..."
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1
+          try {
+              Write-Host "禁用远程桌面连接..."
+              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1 -ErrorAction SilentlyContinue
+              Write-Host "远程桌面已禁用"
+              
+              Write-Host "清理临时文件..."
+              Remove-Item -Path "$env:TEMP\*" -Force -Recurse -ErrorAction SilentlyContinue
+              Write-Host "清理完成"
+              
+          } catch {
+              Write-Host "清理过程中出现非关键错误: $($_.Exception.Message)"
+              Write-Host "继续完成工作流..."
+          }
           
-          Write-Host "禁用管理员账户..."
-          net user administrator /active:no
-          
-          Write-Host "清理完成"
+          Write-Host "✅ 工作流执行完毕"
