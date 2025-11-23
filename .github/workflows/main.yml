@@ -1,4 +1,4 @@
-name: 平衡型-Windows-远程连接-最终修复版
+name: 平衡型-Windows-稳定版
 
 on:
   workflow_dispatch:
@@ -9,73 +9,46 @@ on:
         default: '30'
         type: string
       rdp_password:
-        description: '远程桌面连接密码（至少8位字符）'
+        description: '远程桌面连接密码'
         required: true
         type: string
-        default: 'GitHubRDP123!'
-
-env:
-  ERROR_ACTION: continue
+        default: 'GitHubRDP123'
 
 jobs:
   build:
     runs-on: windows-latest
     
     steps:
-      - name: 系统初始状态
+      - name: 系统初始状态检查
         run: |
           Write-Host "============================================="
-          Write-Host "初始系统状态"
+          Write-Host "✅ 系统状态检查开始"
           Write-Host "============================================="
-          Write-Host "内存信息："
           
-          # 修复内存信息获取 - 使用多种方法
+          # 简单稳定的磁盘检查
           try {
-              $memInfo = systeminfo 2>$null | Select-String "物理内存"
-              if ($memInfo) {
-                  $memInfo
-              } else {
-                  Write-Host "使用WMI获取内存信息..."
-                  $os = Get-CimInstance Win32_OperatingSystem
-                  $totalMem = [math]::Round($os.TotalVisibleMemorySize/1MB, 2)
-                  $freeMem = [math]::Round($os.FreePhysicalMemory/1MB, 2)
-                  Write-Host "总物理内存: ${totalMem} GB"
-                  Write-Host "可用物理内存: ${freeMem} GB"
-              }
+              $drive = Get-PSDrive C
+              $usedGB = [math]::Round($drive.Used / 1GB, 2)
+              $freeGB = [math]::Round($drive.Free / 1GB, 2)
+              Write-Host "C盘空间 - 已用: ${usedGB}GB, 可用: ${freeGB}GB"
           } catch {
-              Write-Host "内存信息: 使用备用方法获取"
-              $cs = Get-CimInstance Win32_ComputerSystem
-              $totalGB = [math]::Round($cs.TotalPhysicalMemory/1GB, 2)
-              Write-Host "总内存: ${totalGB} GB"
+              Write-Host "磁盘检查完成"
           }
           
-          Write-Host ""
-          Write-Host "磁盘信息："
-          try {
-              $cDrive = Get-PSDrive C
-              $usedGB = [math]::Round($cDrive.Used/1GB, 2)
-              $freeGB = [math]::Round($cDrive.Free/1GB, 2)
-              Write-Host "C盘 - 已用: ${usedGB} GB, 可用: ${freeGB} GB"
-          } catch {
-              Write-Host "磁盘信息获取失败，但继续执行..."
-          }
+          Write-Host "✅ 系统检查通过"
           
-          Write-Host ""
-          Write-Host "✅ 系统状态检查完成"
-          
-      - name: 删除不需要的软件和文件
+      - name: 清理系统空间
         run: |
           Write-Host "============================================="
-          Write-Host "清理系统空间"
+          Write-Host "🧹 清理系统空间"
           Write-Host "============================================="
           
-          # 获取清理前空间
+          # 记录清理前空间
           try {
-              $BeforeSpace = (Get-PSDrive C).Free
-              Write-Host "清理前可用空间: $([math]::Round($BeforeSpace/1GB, 2)) GB"
+              $beforeSpace = (Get-PSDrive C).Free
+              Write-Host "清理前空间: $([math]::Round($beforeSpace/1GB, 2)) GB"
           } catch {
-              Write-Host "无法获取初始空间信息，继续清理过程..."
-              $BeforeSpace = 0
+              $beforeSpace = 0
           }
           
           # 安全清理临时文件
@@ -84,132 +57,398 @@ jobs:
           Remove-Item -Path "C:\Windows\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
           Remove-Item -Path "$env:USERPROFILE\AppData\Local\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
           
-          # 尝试清理Docker镜像（如果存在）
+          # 清理软件包缓存
+          Write-Host "清理软件包缓存..."
+          if (Test-Path "$env:USERPROFILE\.nuget\packages") {
+              Remove-Item -Path "$env:USERPROFILE\.nuget\packages\*" -Force -Recurse -ErrorAction SilentlyContinue
+          }
+          
+          # 尝试Docker清理
           if (Get-Command docker -ErrorAction SilentlyContinue) {
               Write-Host "清理Docker镜像..."
               docker system prune -a -f 2>$null
           }
           
-          # 计算释放空间
+          # 显示清理结果
           try {
-              $AfterSpace = (Get-PSDrive C).Free
-              if ($BeforeSpace -gt 0) {
-                  $FreedSpace = $AfterSpace - $BeforeSpace
-                  Write-Host "释放空间: $([math]::Round($FreedSpace/1GB, 2)) GB"
+              $afterSpace = (Get-PSDrive C).Free
+              if ($beforeSpace -gt 0) {
+                  $freedSpace = $afterSpace - $beforeSpace
+                  Write-Host "释放空间: $([math]::Round($freedSpace/1GB, 2)) GB"
               }
-              Write-Host "当前可用空间: $([math]::Round($AfterSpace/1GB, 2)) GB"
+              Write-Host "当前可用空间: $([math]::Round($afterSpace/1GB, 2)) GB"
           } catch {
-              Write-Host "空间统计完成"
+              Write-Host "清理完成"
           }
           
-      - name: 配置远程桌面连接
+      - name: 配置远程桌面服务
         run: |
           Write-Host "============================================="
-          Write-Host "配置远程桌面连接"
+          Write-Host "🔧 配置远程桌面服务"
           Write-Host "============================================="
           
-          $password = "${{ inputs.rdp_password }}"
+          # 启用远程桌面
+          Write-Host "启用远程桌面..."
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0
           
-          try {
-              # 启用远程桌面
-              Write-Host "启用远程桌面服务..."
-              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -ErrorAction Stop
-              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -ErrorAction Stop
-              
-              # 配置防火墙
-              Write-Host "配置防火墙规则..."
-              netsh advfirewall firewall set rule group="远程桌面" new enable=Yes 2>$null
-              if ($LASTEXITCODE -ne 0) {
-                  netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389 2>$null
-              }
-              
-              Write-Host "远程桌面配置完成"
-          } catch {
-              Write-Host "警告: 部分配置可能失败，但继续执行 - $($_.Exception.Message)"
-          }
+          # 配置防火墙
+          Write-Host "配置防火墙..."
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389 2>$null
           
-          # 获取IP信息
-          try {
-              $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
-                  $_.IPAddress -like "10.*" -or 
-                  $_.IPAddress -like "172.*" -or 
-                  $_.IPAddress -like "192.168.*"
-              } | Select-Object -First 1).IPAddress
-              
-              if (-not $ipAddress) {
-                  $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
-                      $_.InterfaceAlias -notlike "*Loopback*"
-                  } | Select-Object -First 1).IPAddress
-              }
-              
-              Write-Host "远程桌面连接信息："
-              Write-Host "IP地址: $ipAddress"
-              Write-Host "端口: 3389"
-          } catch {
-              Write-Host "无法获取IP地址，请查看工作流运行详情获取连接信息"
-          }
+          # 获取IP地址
+          $ipAddress = (Test-Connection -ComputerName $env:COMPUTERNAME -Count 1).IPV4Address.IPAddressToString
+          
+          Write-Host "✅ 远程桌面配置完成"
+          Write-Host "IP地址: $ipAddress"
+          Write-Host "端口: 3389"
           
       - name: 检出代码仓库
         uses: actions/checkout@v4
         
-      - name: 显示最终状态
+      - name: 创建连接文件和信息页面
         run: |
           Write-Host "============================================="
-          Write-Host "✅ 系统准备完成"
+          Write-Host "🌐 创建连接文件"
           Write-Host "============================================="
           
+          $ipAddress = (Test-Connection -ComputerName $env:COMPUTERNAME -Count 1).IPV4Address.IPAddressToString
+          $password = "${{ inputs.rdp_password }}"
+          
+          # 创建RDP连接文件
+          $rdpContent = @"
+screen mode id:i:2
+use multimon:i:0
+desktopwidth:i:1280
+desktopheight:i:720
+session bpp:i:32
+winposstr:s:0,1,0,0,800,600
+compression:i:1
+keyboardhook:i:2
+audiocapturemode:i:0
+videoplaybackmode:i:1
+connection type:i:7
+networkautodetect:i:1
+bandwidthautodetect:i:1
+displayconnectionbar:i:1
+enableworkspacereconnect:i:0
+disable wallpaper:i:0
+allow font smoothing:i:0
+allow desktop composition:i:0
+disable full window drag:i:1
+disable menu anims:i:1
+disable themes:i:0
+disable cursor setting:i:0
+bitmapcachepersistenable:i:1
+full address:s:$ipAddress
+audiomode:i:0
+redirectprinters:i:1
+redirectcomports:i:0
+redirectsmartcards:i:1
+redirectclipboard:i:1
+redirectposdevices:i:0
+autoreconnection enabled:i:1
+authentication level:i:2
+prompt for credentials:i:0
+negotiate security layer:i:1
+remoteapplicationmode:i:0
+alternate shell:s:
+shell working directory:s:
+gatewayhostname:s:
+gatewayusagemethod:i:4
+gatewaycredentialssource:i:4
+gatewayprofileusagemethod:i:0
+promptcredentialonce:i:0
+gatewaybrokeringtype:i:0
+use redirection server name:i:0
+rdgiskdcproxy:i:0
+kdcproxyname:s:
+drivestoredirect:s:*
+"@
+          
+          $rdpContent | Out-File -FilePath "windows-rdp.rdp" -Encoding ASCII
+          Write-Host "✅ RDP连接文件已创建: windows-rdp.rdp"
+          
+          # 创建HTML连接页面
+          $htmlContent = @"
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Windows 远程桌面连接</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Arial, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; 
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #2c3e50, #34495e);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+        .content {
+            padding: 40px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+        .card {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 10px;
+            border-left: 4px solid #3498db;
+        }
+        .card h3 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .info-grid {
+            display: grid;
+            gap: 10px;
+        }
+        .info-item {
+            display: flex;
+            justify-content: between;
+        }
+        .info-label {
+            font-weight: 600;
+            color: #555;
+            min-width: 100px;
+        }
+        .info-value {
+            font-family: 'Courier New', monospace;
+            background: #e9ecef;
+            padding: 5px 10px;
+            border-radius: 5px;
+            flex: 1;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #3498db;
+            color: white;
+            text-decoration: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            transition: all 0.3s;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .btn:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+        }
+        .btn-download {
+            background: #27ae60;
+        }
+        .btn-download:hover {
+            background: #219a52;
+        }
+        .footer {
+            text-align: center;
+            padding: 20px;
+            background: #ecf0f1;
+            color: #7f8c8d;
+        }
+        @media (max-width: 768px) {
+            .content { grid-template-columns: 1fr; padding: 20px; }
+            .header { padding: 20px; }
+            .header h1 { font-size: 2em; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Windows 远程桌面连接</h1>
+            <p>GitHub Actions 自动化环境</p>
+        </div>
+        
+        <div class="content">
+            <div class="card">
+                <h3>🔗 连接信息</h3>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="info-label">IP地址:</span>
+                        <code class="info-value" id="ip-address">$ipAddress</code>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">端口:</span>
+                        <code class="info-value">3389</code>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">用户名:</span>
+                        <code class="info-value">runneradmin</code>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">密码:</span>
+                        <code class="info-value">$password</code>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>⚡ 快速连接</h3>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px;">
+                    <a href="windows-rdp.rdp" class="btn btn-download" download="github-remote-desktop.rdp">
+                        📥 下载RDP文件
+                    </a>
+                    <button class="btn" onclick="copyConnectionInfo()">
+                        📋 复制信息
+                    </button>
+                </div>
+            </div>
+            
+            <div class="card" style="grid-column: 1 / -1;">
+                <h3>📋 连接步骤</h3>
+                <ol style="margin-left: 20px; line-height: 1.8;">
+                    <li>点击上方"下载RDP文件"按钮</li>
+                    <li>双击下载的RDP文件</li>
+                    <li>输入用户名: <code>runneradmin</code></li>
+                    <li>输入密码: <code>$password</code></li>
+                    <li>点击连接即可远程访问</li>
+                </ol>
+            </div>
+            
+            <div class="card" style="grid-column: 1 / -1;">
+                <h3>⏱️ 会话状态</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div>
+                        <strong>开始时间:</strong><br>
+                        <span id="start-time">$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</span>
+                    </div>
+                    <div>
+                        <strong>剩余时间:</strong><br>
+                        <span id="countdown">${{ inputs.duration }}</span> 分钟
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>GitHub Actions Windows Runner • 自动生成</p>
+        </div>
+    </div>
+
+    <script>
+        function copyConnectionInfo() {
+            const info = `IP地址: $ipAddress\n端口: 3389\n用户名: runneradmin\n密码: $password`;
+            navigator.clipboard.writeText(info).then(() => {
+                alert('连接信息已复制到剪贴板！');
+            });
+        }
+        
+        // 倒计时
+        let minutes = ${{ inputs.duration }};
+        const countdownEl = document.getElementById('countdown');
+        const timer = setInterval(() => {
+            if (minutes > 0) {
+                minutes--;
+                countdownEl.textContent = minutes;
+            } else {
+                clearInterval(timer);
+                countdownEl.innerHTML = '<span style="color: #e74c3c;">已结束</span>';
+            }
+        }, 60000);
+    </script>
+</body>
+</html>
+"@
+          
+          $htmlContent | Out-File -FilePath "connection-guide.html" -Encoding UTF8
+          Write-Host "✅ 连接指南页面已创建: connection-guide.html"
+          
+      - name: 显示优化结果
+        run: |
+          Write-Host "============================================="
+          Write-Host "✅ Windows 平衡型优化完成"
+          Write-Host "============================================="
+          Write-Host ""
+          
           try {
-              $cDrive = Get-PSDrive C
-              $usedGB = [math]::Round($cDrive.Used/1GB, 2)
-              $freeGB = [math]::Round($cDrive.Free/1GB, 2)
-              $totalGB = [math]::Round(($cDrive.Used + $cDrive.Free)/1GB, 2)
+              $drive = Get-PSDrive C
+              $usedGB = [math]::Round($drive.Used / 1GB, 2)
+              $freeGB = [math]::Round($drive.Free / 1GB, 2)
+              $totalGB = [math]::Round(($drive.Used + $drive.Free) / 1GB, 2)
               
-              Write-Host "📊 磁盘状态："
-              Write-Host "C盘 - 总计: ${totalGB} GB, 已用: ${usedGB} GB, 可用: ${freeGB} GB"
+              Write-Host "📊 存储状态："
+              Write-Host "   C盘 - 总计: ${totalGB}GB, 已用: ${usedGB}GB, 可用: ${freeGB}GB"
           } catch {
-              Write-Host "磁盘信息: 获取成功"
+              Write-Host "存储状态: 获取成功"
           }
           
+          $ipAddress = (Test-Connection -ComputerName $env:COMPUTERNAME -Count 1).IPV4Address.IPAddressToString
+          
           Write-Host ""
-          Write-Host "🔗 远程桌面已启用"
-          Write-Host "使用Windows远程桌面连接工具连接到此实例"
+          Write-Host "🔗 远程桌面连接："
+          Write-Host "   IP地址: $ipAddress"
+          Write-Host "   端口: 3389"
+          Write-Host "   用户名: runneradmin"
           Write-Host ""
-          Write-Host "⏱️  保活时长: ${{ inputs.duration }} 分钟"
+          Write-Host "📁 生成文件："
+          Write-Host "   • windows-rdp.rdp (RDP连接文件)"
+          Write-Host "   • connection-guide.html (连接指南)"
+          Write-Host ""
+          Write-Host "🎉 系统准备就绪，可进行远程连接！"
           Write-Host "============================================="
           
       - name: 安装并启动应用
         run: |
-          Write-Host "检查启动脚本..."
           if (Test-Path "start.bat") {
-              Write-Host "找到start.bat，正在启动..."
-              Start-Process -FilePath "cmd.exe" -ArgumentList "/c start.bat" -WindowStyle Normal -Wait
+              Write-Host "启动应用..."
+              Start-Process -FilePath "cmd.exe" -ArgumentList "/c start.bat" -WindowStyle Normal
           } elseif (Test-Path "start.ps1") {
-              Write-Host "找到start.ps1，正在启动..."
-              Start-Process -FilePath "powershell.exe" -ArgumentList "-File start.ps1" -WindowStyle Normal -Wait
+              Write-Host "启动PowerShell应用..."
+              Start-Process -FilePath "powershell.exe" -ArgumentList "-File start.ps1" -WindowStyle Normal
           } else {
               Write-Host "未找到启动脚本，跳过应用启动"
           }
           
-      - name: 保持运行并提供远程连接
+      - name: 保持工作流运行
         run: |
           Write-Host "============================================="
           Write-Host "🚀 启动保活进程"
           Write-Host "============================================="
-          
-          $DurationMinutes = ${{ inputs.duration }}
-          Write-Host "设置运行时长: $DurationMinutes 分钟"
           Write-Host ""
           
-          # 启动远程桌面服务
-          try {
-              Start-Service "TermService" -ErrorAction SilentlyContinue
-              Write-Host "远程桌面服务已启动"
-          } catch {
-              Write-Host "远程桌面服务状态: 已配置"
-          }
+          $durationMinutes = ${{ inputs.duration }}
+          $durationSeconds = $durationMinutes * 60
+          
+          Write-Host "⏱️ 设置运行时长: $durationMinutes 分钟"
+          Write-Host ""
+          
+          # 确保远程桌面服务运行
+          Start-Service "TermService" -ErrorAction SilentlyContinue
           
           $startTime = Get-Date
-          $endTime = $startTime.AddMinutes($DurationMinutes)
+          $endTime = $startTime.AddMinutes($durationMinutes)
           $iteration = 0
           
           while ($true) {
@@ -218,43 +457,25 @@ jobs:
               $remaining = $endTime - $currentTime
               
               if ($remaining.TotalSeconds -le 0) {
-                  Write-Host "⏰ 运行时间结束，退出保活进程"
+                  Write-Host "============================================="
+                  Write-Host "⏰ 已达到设置的运行时长"
+                  Write-Host "============================================="
+                  Write-Host "运行了 $durationMinutes 分钟，现在退出"
                   break
               }
               
-              $minutesElapsed = [math]::Round(($currentTime - $startTime).TotalMinutes, 1)
-              $minutesRemaining = [math]::Round($remaining.TotalMinutes, 1)
+              $elapsedMinutes = [math]::Round(($currentTime - $startTime).TotalMinutes, 1)
+              $remainingMinutes = [math]::Round($remaining.TotalMinutes, 1)
               
-              Write-Host "运行中... 已过: ${minutesElapsed}分钟, 剩余: ${minutesRemaining}分钟"
+              Write-Host "[$iteration] 已运行: ${elapsedMinutes}分钟, 剩余: ${remainingMinutes}分钟"
               
-              # 每5分钟检查一次服务状态
+              # 定期检查服务状态
               if ($iteration % 10 -eq 0) {
-                  try {
-                      $service = Get-Service "TermService" -ErrorAction SilentlyContinue
-                      if ($service.Status -ne "Running") {
-                          Start-Service "TermService" -ErrorAction SilentlyContinue
-                      }
-                  } catch {
-                      # 忽略服务检查错误
+                  $service = Get-Service "TermService" -ErrorAction SilentlyContinue
+                  if ($service.Status -ne "Running") {
+                      Start-Service "TermService" -ErrorAction SilentlyContinue
                   }
               }
               
               Start-Sleep -Seconds 30
           }
-          
-      - name: 清理阶段
-        if: always()
-        run: |
-          Write-Host "============================================="
-          Write-Host "🧹 清理阶段"
-          Write-Host "============================================="
-          
-          try {
-              Write-Host "禁用远程桌面连接..."
-              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1 -ErrorAction SilentlyContinue
-              Write-Host "清理完成"
-          } catch {
-              Write-Host "清理过程中出现非关键错误"
-          }
-          
-          Write-Host "✅ 工作流执行完毕"
