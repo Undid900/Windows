@@ -1,4 +1,4 @@
-name: 平衡型-ARM
+name: 平衡型-Windows
 
 on:
   workflow_dispatch:
@@ -11,150 +11,147 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm
+    runs-on: windows-latest
     
     steps:
       - name: 系统初始状态
         run: |
-          echo "============================================="
-          echo "初始系统状态"
-          echo "============================================="
-          echo "内存和交换空间："
-          sudo free -h
-          echo ""
-          echo "可用存储："
-          sudo df -h
-          echo ""
+          Write-Host "============================================="
+          Write-Host "初始系统状态"
+          Write-Host "============================================="
+          Write-Host "内存使用情况："
+          systeminfo | Select-String "Total Physical Memory", "Available Physical Memory"
+          Write-Host ""
+          Write-Host "磁盘空间："
+          Get-PSDrive C | Format-Table Name, Used, Free, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB,2)}}, @{Name="Used(GB)"; Expression={[math]::Round($_.Used/1GB,2)}}
+          Write-Host ""
           
-      - name: 删除不需要的软件
+      - name: 删除不需要的软件和清理空间
         run: |
-          set -euo pipefail
+          Write-Host "============================================="
+          Write-Host "清理不需要的文件和软件"
+          Write-Host "============================================="
           
-          echo "============================================="
-          echo "删除不需要的软件"
-          echo "============================================="
-          echo ""
+          # 获取清理前的空间
+          $Before = (Get-PSDrive C).Free
           
-          SPACE_BEFORE=$(df --output=avail -B 1 / | tail -1)
+          # 清理临时文件
+          Write-Host "清理临时文件..."
+          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
           
-          remove_dir() {
-            local dir="$1"
-            local name="$2"
-            if [[ -d "$dir" ]] || [[ -f "$dir" ]]; then
-              echo -n "删除 $name... "
-              local size_mb=$(sudo du -sm "$dir" 2>/dev/null | cut -f1 || echo "0")
-              sudo rm -rf "$dir"
-              echo "释放 ${size_mb} MB"
-            else
-              echo "跳过 $name (未找到)"
-            fi
-          }
+          # 清理系统缓存
+          Write-Host "清理系统缓存..."
+          Cleanmgr /sagerun:1 | Out-Null
           
-          # 平衡型 - 删除常见的大型软件包
+          # 清理NuGet缓存
+          Write-Host "清理NuGet缓存..."
+          Remove-Item -Path "$env:USERPROFILE\.nuget\packages\*" -Recurse -Force -ErrorAction SilentlyContinue
           
-          # 第一步：卸载APT软件包
-          echo ""
-          echo "正在卸载APT软件包..."
-          sudo apt-get remove -y --purge \
-            microsoft-edge-stable \
-            google-chrome-stable \
-            'temurin-*-jdk' \
-            'llvm-*-dev' \
-            2>/dev/null || true
+          # 清理npm缓存
+          Write-Host "清理npm缓存..."
+          npm cache clean --force 2>$null
           
-          sudo apt-get autoremove -y 2>/dev/null || true
-          echo "APT软件包卸载完成"
-          echo ""
+          # 清理pip缓存
+          Write-Host "清理pip缓存..."
+          pip cache purge 2>$null
           
-          # 第二步：删除目录（包括APT残留和非APT软件）
-          remove_dir "/usr/share/dotnet" ".NET SDK"
-          remove_dir "/usr/local/lib/android" "Android SDK"
-          remove_dir "/usr/local/.ghcup" "GHCup (Haskell)"
-          remove_dir "/usr/local/julia1.11.7" "Julia"
-          remove_dir "/usr/share/miniconda" "Miniconda"
-          remove_dir "/opt/microsoft/msedge" "Microsoft Edge"
-          remove_dir "/opt/google/chrome" "Google Chrome"
-          remove_dir "/usr/lib/firefox" "Firefox"
-          remove_dir "/usr/local/share/chromium" "Chromium"
-          remove_dir "/usr/lib/llvm-16" "LLVM 16"
-          remove_dir "/usr/lib/llvm-17" "LLVM 17"
-          remove_dir "/usr/lib/llvm-18" "LLVM 18"
-          remove_dir "/opt/pipx" "Pipx"
-          remove_dir "/usr/share/man" "手册页"
-          remove_dir "/usr/share/doc" "文档"
+          # 清理Chrome缓存（如果存在）
+          Write-Host "清理浏览器缓存..."
+          Remove-Item -Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue
           
-          echo -n "删除 Docker 镜像... "
-          sudo docker image prune --all --force > /dev/null 2>&1
-          echo "完成"
+          # 清理Windows更新缓存
+          Write-Host "清理Windows更新缓存..."
+          Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
           
-          echo -n "最终清理... "
-          sudo apt-get clean > /dev/null 2>&1 || true
-          echo "完成"
+          # 运行磁盘清理
+          Write-Host "运行磁盘清理..."
+          Start-Process -FilePath "cleanmgr" -ArgumentList "/sagerun:1" -Wait -NoNewWindow
           
-          SPACE_AFTER=$(df --output=avail -B 1 / | tail -1)
-          SPACE_FREED=$((SPACE_AFTER - SPACE_BEFORE))
-          SPACE_FREED_MB=$((SPACE_FREED / 1024 / 1024))
+          # 计算释放的空间
+          $After = (Get-PSDrive C).Free
+          $FreedGB = [math]::Round(($After - $Before) / 1GB, 2)
           
-          echo ""
-          echo "总共释放空间: ${SPACE_FREED_MB} MB"
-          echo ""
+          Write-Host ""
+          Write-Host "总共释放空间: $FreedGB GB"
+          Write-Host ""
           
       - name: 检出代码仓库
         uses: actions/checkout@v4
         
       - name: 显示优化结果
         run: |
-          echo "============================================="
-          echo "✅ 平衡型优化完成"
-          echo "============================================="
-          echo ""
-          echo "📊 存储状态："
-          df -h | grep -E '(Filesystem|/$)'
-          echo ""
-          echo "🧠 内存状态："
-          free -h
-          echo ""
-          ROOT_AVAIL=$(df -BG --output=avail / | tail -1 | tr -d 'G ')
-          echo "🎉 根目录可用空间: ${ROOT_AVAIL} GB"
-          echo "============================================="
-          echo ""
+          Write-Host "============================================="
+          Write-Host "✅ Windows平衡型优化完成"
+          Write-Host "============================================="
+          Write-Host ""
+          Write-Host "📊 磁盘状态："
+          Get-PSDrive C | Format-Table Name, Used, Free, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB,2)}}, @{Name="Used(GB)"; Expression={[math]::Round($_.Used/1GB,2)}} -AutoSize
+          Write-Host ""
+          Write-Host "🧠 内存状态："
+          systeminfo | Select-String "Total Physical Memory", "Available Physical Memory"
+          Write-Host ""
+          $FreeGB = [math]::Round((Get-PSDrive C).Free / 1GB, 2)
+          Write-Host "🎉 C盘可用空间: $FreeGB GB"
+          Write-Host "============================================="
+          Write-Host ""
           
       - name: 安装并启动应用
         run: |
-          if [ -f "start.sh" ]; then
-            echo "正在启动应用..."
+          if (Test-Path "start.ps1") {
+            Write-Host "正在启动应用..."
+            PowerShell -File start.ps1
+          } elseif (Test-Path "start.bat") {
+            Write-Host "正在启动应用..."
+            cmd /c start.bat
+          } elseif (Test-Path "start.sh") {
+            Write-Host "检测到start.sh，尝试使用Git Bash或WSL运行..."
             bash start.sh
-          else
-            echo "警告：未找到 start.sh 文件，跳过应用启动"
-          fi
+          } else {
+            Write-Host "警告：未找到启动脚本（start.ps1、start.bat或start.sh），跳过应用启动"
+          }
           
       - name: 保持工作流运行
         run: |
-          echo "============================================="
-          echo "🚀 启动保活进程"
-          echo "============================================="
-          echo ""
+          Write-Host "============================================="
+          Write-Host "🚀 启动保活进程"
+          Write-Host "============================================="
+          Write-Host ""
           
-          DURATION_MINUTES=${{ inputs.duration }}
-          DURATION_SECONDS=$((DURATION_MINUTES * 60))
+          $DurationMinutes = ${{ inputs.duration }}
+          $DurationSeconds = $DurationMinutes * 60
           
-          echo "⏱️  设置运行时长: ${DURATION_MINUTES} 分钟"
-          echo ""
+          Write-Host "⏱️  设置运行时长: $DurationMinutes 分钟"
+          Write-Host ""
           
-          START_TIME=$(date +%s)
-          END_TIME=$((START_TIME + DURATION_SECONDS))
-          ITERATION=0
+          $StartTime = Get-Date
+          $EndTime = $StartTime.AddMinutes($DurationMinutes)
+          $Iteration = 0
           
-          while true; do
-            ITERATION=$((ITERATION + 1))
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$((CURRENT_TIME - START_TIME))
-            REMAINING=$((END_TIME - CURRENT_TIME))
+          while ($true) {
+            $Iteration++
+            $CurrentTime = Get-Date
+            $Elapsed = $CurrentTime - $StartTime
+            $Remaining = $EndTime - $CurrentTime
             
-            if [ $REMAINING -le 0 ]; then
-              echo "============================================="
-              echo "⏰ 已达到设置的运行时长"
-              echo "============================================="
-              echo "运行了 ${DURATION_MINUTES} 分钟，现在退出"
-              echo ""
-              bre
+            if ($Remaining.TotalSeconds -le 0) {
+              Write-Host "============================================="
+              Write-Host "⏰ 已达到设置的运行时长"
+              Write-Host "============================================="
+              Write-Host "运行了 $DurationMinutes 分钟，现在退出"
+              Write-Host ""
+              break
+            }
+            
+            # 每5分钟输出一次状态
+            if ($Iteration % 10 -eq 1) {
+              $ElapsedMin = [math]::Round($Elapsed.TotalMinutes, 1)
+              $RemainingMin = [math]::Round($Remaining.TotalMinutes, 1)
+              Write-Host "[$($CurrentTime.ToString('yyyy-MM-dd HH:mm:ss'))] 已运行: ${ElapsedMin}分钟, 剩余: ${RemainingMin}分钟"
+            }
+            
+            Start-Sleep -Seconds 30
+          }
+          
+          Write-Host "✅ 保活进程正常结束"
