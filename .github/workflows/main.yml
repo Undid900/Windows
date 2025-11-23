@@ -1,13 +1,8 @@
-name: 平衡型-Windows-RDP-增强版
+name: 平衡型-Windows-RDP-无限制版
 
 on:
   workflow_dispatch:
     inputs:
-      duration:
-        description: '保活时长（分钟）'
-        required: true
-        default: '30'
-        type: number
       rdp_password:
         description: 'RDP远程连接密码（最少8位，包含大小写字母和数字）'
         required: true
@@ -15,12 +10,12 @@ on:
         type: string
 
 env:
-  WORKFLOW_DURATION: ${{ inputs.duration }}
+  WORKFLOW_DURATION: 360  # 设置为GitHub允许的最大值
 
 jobs:
   rdp-setup:
     runs-on: windows-latest
-    timeout-minutes: ${{ inputs.duration + 5 }}
+    timeout-minutes: 360  # GitHub Actions最大允许6小时
     
     steps:
       - name: 验证输入参数
@@ -36,15 +31,8 @@ jobs:
               exit 1
           }
           
-          # 验证时长
-          $duration = $env:WORKFLOW_DURATION
-          if ($duration -lt 1 -or $duration -gt 360) {
-              Write-Host "❌ 错误: 时长必须在1-360分钟之间" -ForegroundColor Red
-              exit 1
-          }
-          
           Write-Host "✅ 参数验证通过" -ForegroundColor Green
-          Write-Host "⏱️  运行时长: $duration 分钟" -ForegroundColor Yellow
+          Write-Host "⏱️  最大运行时长: 360分钟 (GitHub限制)" -ForegroundColor Yellow
           Write-Host ""
 
       - name: 系统初始状态检查
@@ -217,7 +205,7 @@ jobs:
           Write-Host "##[group]🖥️ 系统信息" -ForegroundColor Yellow
           Write-Host "计算机名: $env:COMPUTERNAME" -ForegroundColor White
           Write-Host "用户名: $env:USERNAME" -ForegroundColor White
-          Write-Host "运行时长: $env:WORKFLOW_DURATION 分钟" -ForegroundColor White
+          Write-Host "运行时长: 最长360分钟 (GitHub限制)" -ForegroundColor White
           Write-Host "##[endgroup]"
           
           Write-Host "##[group]🌐 网络信息" -ForegroundColor Yellow
@@ -244,8 +232,8 @@ jobs:
           
           Write-Host ""
           Write-Host "⚠️  重要提示:" -ForegroundColor Red
-          Write-Host "• GitHub Actions运行器可能位于NAT后，外部可能无法直接连接" -ForegroundColor Yellow
-          Write-Host "• 连接成功率取决于运行环境的网络配置" -ForegroundColor Yellow
+          Write-Host "• GitHub Actions最大运行时间为6小时" -ForegroundColor Yellow
+          Write-Host "• 运行器可能位于NAT后，外部可能无法直接连接" -ForegroundColor Yellow
           Write-Host "• 工作流结束后实例将自动销毁" -ForegroundColor Yellow
           Write-Host ""
 
@@ -320,19 +308,20 @@ jobs:
               Write-Host "✅ 应用启动命令已发送" -ForegroundColor Green
           }
 
-      - name: 系统监控和保活
+      - name: 无限时保活运行
         run: |
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "⏰ 系统监控和保活" -ForegroundColor Cyan
+          Write-Host "⏰ 无限时保活运行" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
           
-          $duration = $env:WORKFLOW_DURATION
-          $endTime = (Get-Date).AddMinutes($duration)
+          $startTime = Get-Date
           $checkInterval = 30  # 检查间隔秒数
           $iteration = 0
+          $maxRuntime = 355  # 比timeout少5分钟，确保正常退出
           
-          Write-Host "⏱️  总运行时长: $duration 分钟" -ForegroundColor Yellow
-          Write-Host "🕐 预计结束时间: $($endTime.ToString('HH:mm:ss'))" -ForegroundColor Yellow
+          Write-Host "🔄 无限时运行模式已启用" -ForegroundColor Yellow
+          Write-Host "⏱️  最大运行时间: 355分钟 (GitHub限制)" -ForegroundColor Yellow
+          Write-Host "🕐 开始时间: $($startTime.ToString('HH:mm:ss'))" -ForegroundColor Yellow
           Write-Host "🔍 检查间隔: $checkInterval 秒" -ForegroundColor Yellow
           Write-Host ""
           
@@ -350,16 +339,24 @@ jobs:
               }
           }
           
-          while ((Get-Date) -lt $endTime) {
+          while ($true) {
               $iteration++
-              $remaining = $endTime - (Get-Date)
-              $remainingMinutes = [math]::Round($remaining.TotalMinutes, 1)
+              $currentTime = Get-Date
+              $elapsed = $currentTime - $startTime
+              $elapsedMinutes = [math]::Round($elapsed.TotalMinutes, 1)
+              
+              # 检查是否接近最大运行时间
+              if ($elapsedMinutes -ge $maxRuntime) {
+                  Write-Host "⚠️  接近GitHub最大运行时间限制，准备退出..." -ForegroundColor Yellow
+                  break
+              }
               
               # 每5次迭代显示一次详细状态
               if ($iteration % 5 -eq 1) {
                   $status = Get-SystemStatus
                   Write-Host "##[group]📊 系统状态监控 (#$iteration)" -ForegroundColor Cyan
-                  Write-Host "剩余时间: $remainingMinutes 分钟" -ForegroundColor White
+                  Write-Host "已运行时间: $elapsedMinutes 分钟" -ForegroundColor White
+                  Write-Host "剩余时间: $($maxRuntime - $elapsedMinutes) 分钟" -ForegroundColor White
                   Write-Host "CPU使用率: $($status.CPU)%" -ForegroundColor White
                   Write-Host "内存可用: $($status.Memory)%" -ForegroundColor White
                   Write-Host "磁盘可用: $($status.Disk)%" -ForegroundColor White
@@ -372,7 +369,7 @@ jobs:
                       Start-Service -Name "TermService" -ErrorAction SilentlyContinue
                   }
               } else {
-                  Write-Host "运行中... 剩余: $remainingMinutes 分钟 (迭代: $iteration)" -ForegroundColor Gray
+                  Write-Host "运行中... 已运行: $elapsedMinutes 分钟, 剩余: $($maxRuntime - $elapsedMinutes) 分钟 (迭代: $iteration)" -ForegroundColor Gray
               }
               
               Start-Sleep -Seconds $checkInterval
@@ -381,7 +378,7 @@ jobs:
           Write-Host "=============================================" -ForegroundColor Cyan
           Write-Host "✅ 工作流执行完成" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "总运行时间: $duration 分钟" -ForegroundColor Green
+          Write-Host "总运行时间: $elapsedMinutes 分钟" -ForegroundColor Green
           Write-Host "总检查次数: $iteration 次" -ForegroundColor Green
           Write-Host "实例即将自动销毁..." -ForegroundColor Yellow
 
@@ -401,6 +398,6 @@ jobs:
           Write-Host "最终系统状态:" -ForegroundColor Yellow
           Write-Host "• 可用内存: $freeMemGB GB" -ForegroundColor White
           Write-Host "• 可用磁盘: $freeDiskGB GB" -ForegroundColor White
-          Write-Host "• 运行时长: $env:WORKFLOW_DURATION 分钟" -ForegroundColor White
+          Write-Host "• 运行时长: $elapsedMinutes 分钟" -ForegroundColor White
           Write-Host ""
           Write-Host "🎯 工作流执行完成！" -ForegroundColor Green
