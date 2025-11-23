@@ -1,4 +1,4 @@
-name: 平衡型-Windows
+name: 平衡型-ARM-修复版
 
 on:
   workflow_dispatch:
@@ -11,147 +11,142 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-24.04-arm
     
     steps:
       - name: 系统初始状态
         run: |
-          Write-Host "============================================="
-          Write-Host "初始系统状态"
-          Write-Host "============================================="
-          Write-Host "内存使用情况："
-          systeminfo | Select-String "Total Physical Memory", "Available Physical Memory"
-          Write-Host ""
-          Write-Host "磁盘空间："
-          Get-PSDrive C | Format-Table Name, Used, Free, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB,2)}}, @{Name="Used(GB)"; Expression={[math]::Round($_.Used/1GB,2)}}
-          Write-Host ""
+          echo "============================================="
+          echo "初始系统状态"
+          echo "============================================="
+          echo "内存和交换空间："
+          free -h
+          echo ""
+          echo "可用存储："
+          df -h
+          echo ""
           
-      - name: 删除不需要的软件和清理空间
+      - name: 删除不需要的软件
         run: |
-          Write-Host "============================================="
-          Write-Host "清理不需要的文件和软件"
-          Write-Host "============================================="
+          set -e
           
-          # 获取清理前的空间
-          $Before = (Get-PSDrive C).Free
+          echo "============================================="
+          echo "删除不需要的软件"
+          echo "============================================="
+          echo ""
           
-          # 清理临时文件
-          Write-Host "清理临时文件..."
-          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+          # 记录开始空间
+          SPACE_BEFORE=$(df / | awk 'NR==2 {print $4}')
           
-          # 清理系统缓存
-          Write-Host "清理系统缓存..."
-          Cleanmgr /sagerun:1 | Out-Null
+          # 安全删除函数
+          safe_remove() {
+            local target="$1"
+            local name="$2"
+            if [ -e "$target" ] || [ -d "$target" ]; then
+              echo -n "删除 $name... "
+              if sudo rm -rf "$target" 2>/dev/null; then
+                echo "完成"
+              else
+                echo "失败（无权限或不存在）"
+              fi
+            else
+              echo "跳过 $name（不存在）"
+            fi
+          }
           
-          # 清理NuGet缓存
-          Write-Host "清理NuGet缓存..."
-          Remove-Item -Path "$env:USERPROFILE\.nuget\packages\*" -Recurse -Force -ErrorAction SilentlyContinue
+          # 清理APT包
+          echo "清理APT包..."
+          sudo apt-get autoremove -y > /dev/null 2>&1 || true
+          sudo apt-get clean > /dev/null 2>&1 || true
           
-          # 清理npm缓存
-          Write-Host "清理npm缓存..."
-          npm cache clean --force 2>$null
+          # 删除大目录
+          safe_remove "/usr/share/dotnet" "Dotnet"
+          safe_remove "/usr/local/lib/android" "Android SDK" 
+          safe_remove "/opt/hostedtoolcache" "工具缓存"
+          safe_remove "/usr/local/lib/node_modules" "Node模块"
           
-          # 清理pip缓存
-          Write-Host "清理pip缓存..."
-          pip cache purge 2>$null
-          
-          # 清理Chrome缓存（如果存在）
-          Write-Host "清理浏览器缓存..."
-          Remove-Item -Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue
-          
-          # 清理Windows更新缓存
-          Write-Host "清理Windows更新缓存..."
-          Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
-          
-          # 运行磁盘清理
-          Write-Host "运行磁盘清理..."
-          Start-Process -FilePath "cleanmgr" -ArgumentList "/sagerun:1" -Wait -NoNewWindow
-          
-          # 计算释放的空间
-          $After = (Get-PSDrive C).Free
-          $FreedGB = [math]::Round(($After - $Before) / 1GB, 2)
-          
-          Write-Host ""
-          Write-Host "总共释放空间: $FreedGB GB"
-          Write-Host ""
+          # 记录结束空间
+          SPACE_AFTER=$(df / | awk 'NR==2 {print $4}')
+          SPACE_FREED=$((SPACE_AFTER - SPACE_BEFORE))
+          echo ""
+          echo "释放空间: $((SPACE_FREED / 1024)) MB"
+          echo ""
           
       - name: 检出代码仓库
         uses: actions/checkout@v4
         
       - name: 显示优化结果
         run: |
-          Write-Host "============================================="
-          Write-Host "✅ Windows平衡型优化完成"
-          Write-Host "============================================="
-          Write-Host ""
-          Write-Host "📊 磁盘状态："
-          Get-PSDrive C | Format-Table Name, Used, Free, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB,2)}}, @{Name="Used(GB)"; Expression={[math]::Round($_.Used/1GB,2)}} -AutoSize
-          Write-Host ""
-          Write-Host "🧠 内存状态："
-          systeminfo | Select-String "Total Physical Memory", "Available Physical Memory"
-          Write-Host ""
-          $FreeGB = [math]::Round((Get-PSDrive C).Free / 1GB, 2)
-          Write-Host "🎉 C盘可用空间: $FreeGB GB"
-          Write-Host "============================================="
-          Write-Host ""
+          echo "============================================="
+          echo "✅ 优化完成"
+          echo "============================================="
+          echo ""
+          echo "📊 存储状态："
+          df -h | grep -E '(Filesystem|/$)'
+          echo ""
+          echo "🧠 内存状态："
+          free -h
+          echo ""
           
       - name: 安装并启动应用
         run: |
-          if (Test-Path "start.ps1") {
-            Write-Host "正在启动应用..."
-            PowerShell -File start.ps1
-          } elseif (Test-Path "start.bat") {
-            Write-Host "正在启动应用..."
-            cmd /c start.bat
-          } elseif (Test-Path "start.sh") {
-            Write-Host "检测到start.sh，尝试使用Git Bash或WSL运行..."
-            bash start.sh
-          } else {
-            Write-Host "警告：未找到启动脚本（start.ps1、start.bat或start.sh），跳过应用启动"
-          }
+          if [ -f "requirements.txt" ]; then
+            echo "安装Python依赖..."
+            pip install -r requirements.txt
+          fi
+          
+          if [ -f "package.json" ]; then
+            echo "安装Node.js依赖..."
+            npm install
+          fi
+          
+          if [ -f "start.sh" ]; then
+            echo "启动应用..."
+            chmod +x start.sh
+            ./start.sh &
+          elif [ -f "main.py" ]; then
+            echo "启动Python应用..."
+            python main.py &
+          elif [ -f "app.js" ]; then
+            echo "启动Node.js应用..."
+            node app.js &
+          else
+            echo "未找到可启动的应用文件"
+          fi
           
       - name: 保持工作流运行
         run: |
-          Write-Host "============================================="
-          Write-Host "🚀 启动保活进程"
-          Write-Host "============================================="
-          Write-Host ""
+          echo "============================================="
+          echo "启动保活进程"
+          echo "============================================="
+          echo ""
           
-          $DurationMinutes = ${{ inputs.duration }}
-          $DurationSeconds = $DurationMinutes * 60
+          # 从输入获取时长
+          DURATION_MINUTES=${{ inputs.duration }}
+          DURATION_SECONDS=$((DURATION_MINUTES * 60))
           
-          Write-Host "⏱️  设置运行时长: $DurationMinutes 分钟"
-          Write-Host ""
+          echo "设置运行时长: ${DURATION_MINUTES} 分钟"
+          echo ""
           
-          $StartTime = Get-Date
-          $EndTime = $StartTime.AddMinutes($DurationMinutes)
-          $Iteration = 0
+          # 记录开始时间
+          START_TIME=$(date +%s)
+          END_TIME=$((START_TIME + DURATION_SECONDS))
           
-          while ($true) {
-            $Iteration++
-            $CurrentTime = Get-Date
-            $Elapsed = $CurrentTime - $StartTime
-            $Remaining = $EndTime - $CurrentTime
+          # 简单的等待循环
+          while [ $(date +%s) -lt $END_TIME ]; do
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+            REMAINING=$((END_TIME - CURRENT_TIME))
             
-            if ($Remaining.TotalSeconds -le 0) {
-              Write-Host "============================================="
-              Write-Host "⏰ 已达到设置的运行时长"
-              Write-Host "============================================="
-              Write-Host "运行了 $DurationMinutes 分钟，现在退出"
-              Write-Host ""
-              break
-            }
+            ELAPSED_MIN=$((ELAPSED / 60))
+            REMAINING_MIN=$((REMAINING / 60))
             
-            # 每5分钟输出一次状态
-            if ($Iteration % 10 -eq 1) {
-              $ElapsedMin = [math]::Round($Elapsed.TotalMinutes, 1)
-              $RemainingMin = [math]::Round($Remaining.TotalMinutes, 1)
-              Write-Host "[$($CurrentTime.ToString('yyyy-MM-dd HH:mm:ss'))] 已运行: ${ElapsedMin}分钟, 剩余: ${RemainingMin}分钟"
-            }
+            echo "[$(date '+%H:%M:%S')] 已运行: ${ELAPSED_MIN}分钟, 剩余: ${REMAINING_MIN}分钟"
             
-            Start-Sleep -Seconds 30
-          }
+            # 每30秒检查一次
+            sleep 30
+          done
           
-          Write-Host "✅ 保活进程正常结束"
+          echo "============================================="
+          echo "运行完成，总时长: ${DURATION_MINUTES} 分钟"
+          echo "============================================="
