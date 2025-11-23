@@ -1,0 +1,312 @@
+name: Balanced - Windows with Remote Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Keeping Duration (minutes)'
+        required: true
+        default: '30'
+        type: string
+      rdp_password:
+        description: 'Remote Desktop Password (min 8 chars)'
+        required: true
+        type: string
+      rdp_port:
+        description: 'Remote Desktop Port (default: 3389)'
+        required: false
+        default: '3389'
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Initial System State
+        run: |
+          Write-Host "============================================="
+          Write-Host "Initial System State"
+          Write-Host "============================================="
+          
+          Write-Host "`nMemory and swap space:"
+          systeminfo | Select-String "Total Physical Memory|Available Physical Memory|Virtual Memory"
+          
+          Write-Host "`nAvailable storage:"
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, Root, @{n='FreeSpaceGB';e={[math]::Round($_.FreeSpace/1GB, 2)}}
+          
+          Write-Host "`nCPU Information:"
+          Get-WmiObject Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-Table
+
+      - name: Configure Remote Desktop Access
+        run: |
+          Write-Host "============================================="
+          Write-Host "Configuring Remote Desktop Access"
+          Write-Host "============================================="
+          
+          # Set RDP password from input
+          $rdpPassword = "${{ inputs.rdp_password }}"
+          $env:COMPUTERNAME = $env:COMPUTERNAME.ToUpper()
+          
+          # Create a new user for RDP access
+          $userName = "GitHubActionsUser"
+          
+          Write-Host "`nCreating RDP user account: $userName"
+          
+          # Check if user already exists
+          if (-not (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue)) {
+              # Create new user
+              New-LocalUser -Name $userName -Password (ConvertTo-SecureString $rdpPassword -AsPlainText -Force) -FullName "GitHub Actions User" -Description "Temporary user for RDP access"
+              
+              # Add user to Remote Desktop Users group
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $userName
+              Write-Host "User $userName added to Remote Desktop Users group"
+          } else {
+              Write-Host "User $userName already exists, updating password"
+              Set-LocalUser -Name $userName -Password (ConvertTo-SecureString $rdpPassword -AsPlainText -Force)
+          }
+          
+          # Enable Remote Desktop
+          Write-Host "`nEnabling Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+          
+          # Allow RDP through Windows Firewall
+          Write-Host "Configuring Windows Firewall for RDP"
+          New-NetFirewallRule -DisplayName "Allow RDP" -Direction Inbound -Protocol TCP -LocalPort ${{ inputs.rdp_port }} -Action Allow -RemoteAddress Any
+          
+          # Get public IP address
+          $publicIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json').ip
+          $rdpPort = ${{ inputs.rdp_port }}
+          
+          Write-Host "`n============================================="
+          Write-Host "✅ Remote Desktop Configuration Complete"
+          Write-Host "============================================="
+          Write-Host "`n📋 RDP Connection Details:"
+          Write-Host "   Computer: $publicIp`:$rdpPort"
+          Write-Host "   Username: $env:COMPUTERNAME\$userName"
+          Write-Host "   Password: [The password you provided]"
+          Write-Host "`n⚠️  Note: This RDP session will be active for ${{ inputs.duration }} minutes"
+          Write-Host "============================================="
+
+      - name: Clean Up System Space
+        run: |
+          Write-Host "============================================="
+          Write-Host "Cleaning Up System Space"
+          Write-Host "============================================="
+          
+          $drive = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -eq 'C:\' }).Name
+          $beforeFreeSpace = (Get-PSDrive $drive).FreeSpace
+          
+          Write-Host "`nCurrent free space on $drive`: $([math]::Round($beforeFreeSpace/1GB, 2)) GB"
+          
+          # Function to remove directory
+          function Remove-Directory {
+              param(
+                  [string]$path,
+                  [string]$name
+              )
+              
+              if (Test-Path $path) {
+                  $size = (Get-ChildItem $path -Recurse -Force | Measure-Object -Property Length -Sum).Sum
+                  $sizeMB = [math]::Round($size/1MB, 2)
+                  Write-Host "Removing $name ($sizeMB MB)..."
+                  Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
+                  Write-Host "Removed $name"
+              } else {
+                  Write-Host "Skipping $name (not found)"
+              }
+          }
+          
+          # Clean up Windows components
+          Write-Host "`nCleaning up Windows components..."
+          
+          # Clean Windows Update cache
+          Write-Host "Cleaning Windows Update cache..."
+          Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+          Remove-Item "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Start-Service wuauserv -ErrorAction SilentlyContinue
+          
+          # Clean Temp files
+          Write-Host "Cleaning Temp files..."
+          Remove-Item "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+          
+          # Clean Recycle Bin
+          Write-Host "Cleaning Recycle Bin..."
+          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+          
+          # Remove unnecessary applications
+          Write-Host "`nRemoving unnecessary applications..."
+          
+          # Get list of applications to remove
+          $appsToRemove = @(
+              "Microsoft Edge",
+              "Google Chrome",
+              "Mozilla Firefox",
+              "Git",
+              "Python",
+              "Node.js",
+              "Docker",
+              "Visual Studio Code",
+              "7-Zip",
+              "WinRAR"
+          )
+          
+          foreach ($app in $appsToRemove) {
+              $package = Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*$app*" }
+              if ($package) {
+                  Write-Host "Uninstalling $app..."
+                  $package.Uninstall() | Out-Null
+                  Write-Host "Uninstalled $app"
+              }
+          }
+          
+          # Clean up Windows Store apps
+          Write-Host "`nCleaning up Windows Store apps..."
+          Get-AppxPackage -AllUsers | Where-Object { $_.Name -notlike "*Microsoft*" -and $_.Name -notlike "*Windows*" } | Remove-AppxPackage -ErrorAction SilentlyContinue
+          
+          # Clean up system files
+          Write-Host "`nRunning Disk Cleanup..."
+          Cleanmgr /sagerun:1 | Out-Null
+          
+          $afterFreeSpace = (Get-PSDrive $drive).FreeSpace
+          $freedSpace = $afterFreeSpace - $beforeFreeSpace
+          $freedSpaceGB = [math]::Round($freedSpace/1GB, 2)
+          
+          Write-Host "`n============================================="
+          Write-Host "✅ Cleanup Complete"
+          Write-Host "============================================="
+          Write-Host "Freed up space: $freedSpaceGB GB"
+          Write-Host "Current free space: $([math]::Round($afterFreeSpace/1GB, 2)) GB"
+          Write-Host "============================================="
+
+      - name: Check Out Code Repository
+        uses: actions/checkout@v4
+
+      - name: Display Optimization Results
+        run: |
+          Write-Host "============================================="
+          Write-Host "✅ System Optimization Complete"
+          Write-Host "============================================="
+          
+          Write-Host "`n📊 System Status:"
+          Write-Host "------------------------"
+          
+          # Display storage information
+          $drive = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -eq 'C:\' }).Name
+          $freeSpace = [math]::Round((Get-PSDrive $drive).FreeSpace/1GB, 2)
+          Write-Host "Storage (C:): $freeSpace GB free"
+          
+          # Display memory information
+          $memoryInfo = systeminfo | Select-String "Total Physical Memory|Available Physical Memory"
+          $memoryInfo | ForEach-Object { Write-Host $_.Line }
+          
+          # Display CPU information
+          $cpuInfo = Get-WmiObject Win32_Processor | Select-Object Name, NumberOfCores
+          Write-Host "`nCPU: $($cpuInfo.Name)"
+          Write-Host "Cores: $($cpuInfo.NumberOfCores)"
+          
+          Write-Host "`n============================================="
+
+      - name: Install and Launch Application
+        run: |
+          Write-Host "============================================="
+          Write-Host "Installing and Launching Application"
+          Write-Host "============================================="
+          
+          if (Test-Path "start.bat") {
+              Write-Host "Launching application using start.bat..."
+              Start-Process -FilePath "start.bat" -NoNewWindow
+              Write-Host "Application launched successfully"
+          } elseif (Test-Path "start.ps1") {
+              Write-Host "Launching application using start.ps1..."
+              Start-Process -FilePath "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -File start.ps1" -NoNewWindow
+              Write-Host "Application launched successfully"
+          } else {
+              Write-Warning "No start script found (start.bat or start.ps1). Skipping application launch."
+          }
+
+      - name: Keep Workflow Running
+        run: |
+          Write-Host "============================================="
+          Write-Host "🚀 Starting Keep-Alive Process"
+          Write-Host "============================================="
+          
+          $durationMinutes = ${{ inputs.duration }}
+          $durationSeconds = $durationMinutes * 60
+          $startTime = Get-Date
+          $endTime = $startTime.AddMinutes($durationMinutes)
+          
+          Write-Host "`n⏱️  Session Duration: $durationMinutes minutes"
+          Write-Host "📅 Start Time: $($startTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+          Write-Host "📅 End Time: $($endTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+          
+          # Get RDP connection details again for convenience
+          $publicIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json').ip
+          $rdpPort = ${{ inputs.rdp_port }}
+          $userName = "GitHubActionsUser"
+          
+          Write-Host "`n📋 RDP Connection Details:"
+          Write-Host "------------------------"
+          Write-Host "Computer: $publicIp`:$rdpPort"
+          Write-Host "Username: $env:COMPUTERNAME\$userName"
+          Write-Host "Password: [The password you provided]"
+          Write-Host "`n⚠️  Important: This session will automatically end at $($endTime.ToString('HH:mm:ss'))"
+          
+          # Monitor session time
+          $iteration = 0
+          while ($true) {
+              $iteration++
+              $currentTime = Get-Date
+              $elapsed = ($currentTime - $startTime).TotalMinutes
+              $remaining = ($endTime - $currentTime).TotalMinutes
+              
+              if ($remaining -le 0) {
+                  Write-Host "`n============================================="
+                  Write-Host "⏰ Session Time Expired"
+                  Write-Host "============================================="
+                  Write-Host "Session ran for $([math]::Round($elapsed, 2)) minutes"
+                  Write-Host "============================================="
+                  break
+              }
+              
+              # Display status every minute
+              if ($iteration % 6 -eq 0) {  # Every 30 seconds
+                  $remainingMinutes = [math]::Round($remaining, 2)
+                  Write-Host "`n🔄 Session active - $remainingMinutes minutes remaining"
+                  
+                  # Check RDP connections
+                  $rdpSessions = qwinsta.exe | Select-String -Pattern "$userName"
+                  if ($rdpSessions) {
+                      Write-Host "👤 Active RDP connection detected"
+                  } else {
+                      Write-Host "⚠️  No active RDP connections"
+                  }
+              }
+              
+              Start-Sleep -Seconds 5
+          }
+
+      - name: Clean Up After Session
+        if: always()
+        run: |
+          Write-Host "============================================="
+          Write-Host "🧹 Cleaning Up After Session"
+          Write-Host "============================================="
+          
+          # Remove RDP user
+          $userName = "GitHubActionsUser"
+          if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) {
+              Write-Host "Removing RDP user: $userName"
+              Remove-LocalUser -Name $userName -Force -ErrorAction SilentlyContinue
+          }
+          
+          # Disable RDP
+          Write-Host "Disabling Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 1
+          
+          # Remove RDP firewall rule
+          Write-Host "Removing RDP firewall rule"
+          Remove-NetFirewallRule -DisplayName "Allow RDP" -ErrorAction SilentlyContinue
+          
+          Write-Host "`n✅ Cleanup completed successfully"
