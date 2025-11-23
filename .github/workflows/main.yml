@@ -1,4 +1,4 @@
-name: 平衡型-ARM-修复版
+name: 平衡型-Windows-远程连接
 
 on:
   workflow_dispatch:
@@ -8,145 +8,193 @@ on:
         required: true
         default: '30'
         type: string
+      rdp_password:
+        description: '远程桌面连接密码（至少8位字符）'
+        required: true
+        type: string
+        default: 'GitHubRDP123!'
 
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm
+    runs-on: windows-latest
     
     steps:
       - name: 系统初始状态
         run: |
-          echo "============================================="
-          echo "初始系统状态"
-          echo "============================================="
-          echo "内存和交换空间："
-          free -h
-          echo ""
-          echo "可用存储："
-          df -h
-          echo ""
+          Write-Host "============================================="
+          Write-Host "初始系统状态"
+          Write-Host "============================================="
+          Write-Host "内存信息："
+          systeminfo | findstr "物理内存"
+          Write-Host ""
+          Write-Host "磁盘信息："
+          Get-PSDrive C
+          Write-Host ""
           
-      - name: 删除不需要的软件
+      - name: 删除不需要的软件和文件
         run: |
-          set -e
+          Write-Host "============================================="
+          Write-Host "清理系统空间"
+          Write-Host "============================================="
           
-          echo "============================================="
-          echo "删除不需要的软件"
-          echo "============================================="
-          echo ""
+          # 获取清理前空间
+          $BeforeSpace = (Get-PSDrive C).Free
+          Write-Host "清理前可用空间: $([math]::Round($BeforeSpace/1GB, 2)) GB"
           
-          # 记录开始空间
-          SPACE_BEFORE=$(df / | awk 'NR==2 {print $4}')
+          # 清理临时文件
+          Write-Host "清理临时文件..."
+          Remove-Item -Path "$env:TEMP\*" -Force -Recurse -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Windows\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
           
-          # 安全删除函数
-          safe_remove() {
-            local target="$1"
-            local name="$2"
-            if [ -e "$target" ] || [ -d "$target" ]; then
-              echo -n "删除 $name... "
-              if sudo rm -rf "$target" 2>/dev/null; then
-                echo "完成"
-              else
-                echo "失败（无权限或不存在）"
-              fi
-            else
-              echo "跳过 $name（不存在）"
-            fi
-          }
+          # 清理软件包缓存
+          Write-Host "清理软件包缓存..."
+          Remove-Item -Path "$env:USERPROFILE\AppData\Local\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
           
-          # 清理APT包
-          echo "清理APT包..."
-          sudo apt-get autoremove -y > /dev/null 2>&1 || true
-          sudo apt-get clean > /dev/null 2>&1 || true
+          # 清理NuGet缓存
+          Write-Host "清理NuGet缓存..."
+          Remove-Item -Path "$env:USERPROFILE\.nuget\packages\*" -Force -Recurse -ErrorAction SilentlyContinue 2>$null
           
-          # 删除大目录
-          safe_remove "/usr/share/dotnet" "Dotnet"
-          safe_remove "/usr/local/lib/android" "Android SDK" 
-          safe_remove "/opt/hostedtoolcache" "工具缓存"
-          safe_remove "/usr/local/lib/node_modules" "Node模块"
+          # 清理Docker镜像
+          Write-Host "清理Docker镜像..."
+          docker system prune -a -f 2>$null
           
-          # 记录结束空间
-          SPACE_AFTER=$(df / | awk 'NR==2 {print $4}')
-          SPACE_FREED=$((SPACE_AFTER - SPACE_BEFORE))
-          echo ""
-          echo "释放空间: $((SPACE_FREED / 1024)) MB"
-          echo ""
+          # 运行磁盘清理
+          Write-Host "运行磁盘清理..."
+          CleanMgr /sagerun:1 | Out-Null
+          
+          # 获取清理后空间
+          $AfterSpace = (Get-PSDrive C).Free
+          $FreedSpace = $AfterSpace - $BeforeSpace
+          Write-Host "释放空间: $([math]::Round($FreedSpace/1GB, 2)) GB"
+          Write-Host "清理后可用空间: $([math]::Round($AfterSpace/1GB, 2)) GB"
+          
+      - name: 配置远程桌面连接
+        run: |
+          Write-Host "============================================="
+          Write-Host "配置远程桌面连接"
+          Write-Host "============================================="
+          
+          # 设置远程桌面密码
+          $password = "${{ inputs.rdp_password }}"
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # 启用管理员账户
+          Write-Host "启用管理员账户..."
+          net user administrator /active:yes
+          net user administrator $password
+          
+          # 启用远程桌面
+          Write-Host "启用远程桌面..."
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1
+          
+          # 配置防火墙允许RDP
+          Write-Host "配置防火墙..."
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+          
+          # 获取IP信息
+          $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -like "*Ethernet*"} | Select-Object -First 1).IPAddress
+          Write-Host "远程桌面连接信息："
+          Write-Host "IP地址: $ipAddress"
+          Write-Host "用户名: administrator"
+          Write-Host "密码: $password"
+          Write-Host "端口: 3389"
           
       - name: 检出代码仓库
         uses: actions/checkout@v4
         
-      - name: 显示优化结果
+      - name: 显示优化结果和连接信息
         run: |
-          echo "============================================="
-          echo "✅ 优化完成"
-          echo "============================================="
-          echo ""
-          echo "📊 存储状态："
-          df -h | grep -E '(Filesystem|/$)'
-          echo ""
-          echo "🧠 内存状态："
-          free -h
-          echo ""
+          Write-Host "============================================="
+          Write-Host "✅ Windows平衡型优化完成"
+          Write-Host "============================================="
+          Write-Host ""
+          Write-Host "📊 磁盘状态："
+          Get-PSDrive C | Format-Table Name, Used, Free, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB, 2)}}, @{Name="Total(GB)"; Expression={[math]::Round($_.Used/1GB + $_.Free/1GB, 2)}}
+          Write-Host ""
+          Write-Host "🧠 内存信息："
+          systeminfo | findstr "物理内存"
+          Write-Host ""
+          
+          # 显示连接信息
+          $ipAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -like "*Ethernet*"} | Select-Object -First 1).IPAddress
+          Write-Host "🔗 远程桌面连接信息："
+          Write-Host "IP地址: $ipAddress"
+          Write-Host "用户名: administrator"
+          Write-Host "端口: 3389"
+          Write-Host "============================================="
           
       - name: 安装并启动应用
         run: |
-          if [ -f "requirements.txt" ]; then
-            echo "安装Python依赖..."
-            pip install -r requirements.txt
-          fi
+          if (Test-Path "start.bat") {
+            Write-Host "正在启动应用..."
+            Start-Process -FilePath "start.bat" -WindowStyle Normal
+          } elseif (Test-Path "start.ps1") {
+            Write-Host "正在启动PowerShell应用..."
+            Start-Process -FilePath "powershell" -ArgumentList "-File start.ps1" -WindowStyle Normal
+          } else {
+            Write-Host "警告：未找到 start.bat 或 start.ps1 文件，跳过应用启动"
+          }
           
-          if [ -f "package.json" ]; then
-            echo "安装Node.js依赖..."
-            npm install
-          fi
-          
-          if [ -f "start.sh" ]; then
-            echo "启动应用..."
-            chmod +x start.sh
-            ./start.sh &
-          elif [ -f "main.py" ]; then
-            echo "启动Python应用..."
-            python main.py &
-          elif [ -f "app.js" ]; then
-            echo "启动Node.js应用..."
-            node app.js &
-          else
-            echo "未找到可启动的应用文件"
-          fi
-          
-      - name: 保持工作流运行
+      - name: 保持工作流运行并提供远程连接
         run: |
-          echo "============================================="
-          echo "启动保活进程"
-          echo "============================================="
-          echo ""
+          Write-Host "============================================="
+          Write-Host "🚀 启动保活进程和远程桌面服务"
+          Write-Host "============================================="
           
-          # 从输入获取时长
-          DURATION_MINUTES=${{ inputs.duration }}
-          DURATION_SECONDS=$((DURATION_MINUTES * 60))
+          $DurationMinutes = ${{ inputs.duration }}
+          $DurationSeconds = $DurationMinutes * 60
           
-          echo "设置运行时长: ${DURATION_MINUTES} 分钟"
-          echo ""
+          Write-Host "⏱️  设置运行时长: $DurationMinutes 分钟"
+          Write-Host ""
           
-          # 记录开始时间
-          START_TIME=$(date +%s)
-          END_TIME=$((START_TIME + DURATION_SECONDS))
+          # 确保远程桌面服务运行
+          Write-Host "启动远程桌面服务..."
+          Start-Service -Name "TermService" -ErrorAction SilentlyContinue
+          Start-Service -Name "UmRdpService" -ErrorAction SilentlyContinue
           
-          # 简单的等待循环
-          while [ $(date +%s) -lt $END_TIME ]; do
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$((CURRENT_TIME - START_TIME))
-            REMAINING=$((END_TIME - CURRENT_TIME))
+          $StartTime = Get-Date
+          $EndTime = $StartTime.AddMinutes($DurationMinutes)
+          $Iteration = 0
+          
+          while ($true) {
+            $Iteration++
+            $CurrentTime = Get-Date
+            $Elapsed = ($CurrentTime - $StartTime).TotalSeconds
+            $Remaining = ($EndTime - $CurrentTime).TotalSeconds
             
-            ELAPSED_MIN=$((ELAPSED / 60))
-            REMAINING_MIN=$((REMAINING / 60))
+            if ($Remaining -le 0) {
+                Write-Host "============================================="
+                Write-Host "⏰ 已达到设置的运行时长"
+                Write-Host "============================================="
+                Write-Host "运行了 $DurationMinutes 分钟，现在退出"
+                break
+            }
             
-            echo "[$(date '+%H:%M:%S')] 已运行: ${ELAPSED_MIN}分钟, 剩余: ${REMAINING_MIN}分钟"
+            $MinutesRemaining = [math]::Round($Remaining / 60, 1)
+            Write-Host "[迭代 $Iteration] 已运行: $([math]::Round($Elapsed/60, 1)) 分钟, 剩余: $MinutesRemaining 分钟"
             
-            # 每30秒检查一次
-            sleep 30
-          done
+            # 检查远程桌面服务状态
+            $TermService = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
+            if ($TermService.Status -ne "Running") {
+                Write-Host "重新启动远程桌面服务..."
+                Start-Service -Name "TermService"
+            }
+            
+            Start-Sleep -Seconds 30
+          }
           
-          echo "============================================="
-          echo "运行完成，总时长: ${DURATION_MINUTES} 分钟"
-          echo "============================================="
+      - name: 清理和关闭远程桌面
+        if: always()
+        run: |
+          Write-Host "============================================="
+          Write-Host "🧹 清理阶段"
+          Write-Host "============================================="
+          
+          Write-Host "禁用远程桌面..."
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1
+          
+          Write-Host "禁用管理员账户..."
+          net user administrator /active:no
+          
+          Write-Host "清理完成"
