@@ -1,4 +1,4 @@
-name: 平衡型-Windows-RDP
+name: 平衡型-Windows-RDP-增强版
 
 on:
   workflow_dispatch:
@@ -7,182 +7,400 @@ on:
         description: '保活时长（分钟）'
         required: true
         default: '30'
-        type: string
+        type: number
       rdp_password:
-        description: 'RDP远程连接密码（最少8位）'
+        description: 'RDP远程连接密码（最少8位，包含大小写字母和数字）'
         required: true
         default: 'GitHubRDP123!'
         type: string
 
+env:
+  WORKFLOW_DURATION: ${{ inputs.duration }}
+
 jobs:
-  build:
+  rdp-setup:
     runs-on: windows-latest
+    timeout-minutes: ${{ inputs.duration + 5 }}
     
     steps:
-      - name: 系统初始状态
+      - name: 验证输入参数
         run: |
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "初始系统状态" -ForegroundColor Cyan
+          Write-Host "🔍 参数验证" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "内存信息：" -ForegroundColor Yellow
-          systeminfo | Select-String "Total Physical Memory"
-          Write-Host ""
-          Write-Host "磁盘信息：" -ForegroundColor Yellow
-          Get-PSDrive C | Format-Table Name, Used, Free, @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB,2)}}, @{Name="Used(GB)"; Expression={[math]::Round($_.Used/1GB,2)}}
-          Write-Host ""
           
-      - name: 清理系统空间
+          # 验证密码强度
+          $password = "${{ inputs.rdp_password }}"
+          if ($password.Length -lt 8) {
+              Write-Host "❌ 错误: 密码长度必须至少8位" -ForegroundColor Red
+              exit 1
+          }
+          
+          # 验证时长
+          $duration = $env:WORKFLOW_DURATION
+          if ($duration -lt 1 -or $duration -gt 360) {
+              Write-Host "❌ 错误: 时长必须在1-360分钟之间" -ForegroundColor Red
+              exit 1
+          }
+          
+          Write-Host "✅ 参数验证通过" -ForegroundColor Green
+          Write-Host "⏱️  运行时长: $duration 分钟" -ForegroundColor Yellow
+          Write-Host ""
+
+      - name: 系统初始状态检查
         run: |
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "清理系统空间" -ForegroundColor Cyan
+          Write-Host "🖥️ 系统初始状态" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
           
-          # 获取清理前空间
-          $before = Get-PSDrive C | Select-Object -ExpandProperty Free
+          # 系统信息
+          Write-Host "##[group]系统基本信息" -ForegroundColor Yellow
+          systeminfo | Select-String "OS Name","OS Version","System Boot Time"
+          Write-Host "##[endgroup]"
           
-          # 清理临时文件
-          Write-Host "清理临时文件..." -ForegroundColor Yellow
-          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+          # 内存信息
+          Write-Host "##[group]内存状态" -ForegroundColor Yellow
+          $memory = Get-CimInstance Win32_OperatingSystem
+          $totalMem = [math]::Round($memory.TotalVisibleMemorySize/1MB, 2)
+          $freeMem = [math]::Round($memory.FreePhysicalMemory/1MB, 2)
+          Write-Host "总内存: $totalMem GB" -ForegroundColor White
+          Write-Host "可用内存: $freeMem GB" -ForegroundColor White
+          Write-Host "##[endgroup]"
+          
+          # 磁盘信息
+          Write-Host "##[group]磁盘状态" -ForegroundColor Yellow
+          Get-PSDrive C | ForEach-Object {
+              $usedGB = [math]::Round($_.Used/1GB, 2)
+              $freeGB = [math]::Round($_.Free/1GB, 2)
+              $totalGB = [math]::Round(($_.Used + $_.Free)/1GB, 2)
+              $usagePercent = [math]::Round(($_.Used/($_.Used + $_.Free)) * 100, 1)
+              
+              Write-Host "驱动器: $($_.Name)" -ForegroundColor White
+              Write-Host "总空间: $totalGB GB" -ForegroundColor White
+              Write-Host "已用空间: $usedGB GB ($usagePercent%)" -ForegroundColor $(if ($usagePercent -gt 85) { "Red" } else { "White" })
+              Write-Host "可用空间: $freeGB GB" -ForegroundColor $(if ($freeGB -lt 5) { "Red" } else { "Green" })
+          }
+          Write-Host "##[endgroup]"
+          
+          Write-Host ""
+
+      - name: 智能系统清理
+        run: |
+          Write-Host "=============================================" -ForegroundColor Cyan
+          Write-Host "🧹 智能系统清理" -ForegroundColor Cyan
+          Write-Host "=============================================" -ForegroundColor Cyan
+          
+          $startSpace = (Get-PSDrive C).Free
+          $freedSpace = 0
+          
+          # 清理函数
+          function Clean-Directory {
+              param($Path, $Description)
+              
+              if (Test-Path $Path) {
+                  try {
+                      $sizeBefore = (Get-ChildItem $Path -Recurse -ErrorAction SilentlyContinue | 
+                                   Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum / 1MB
+                      $sizeBefore = [math]::Round($sizeBefore, 2)
+                      
+                      Remove-Item -Path "$Path\*" -Recurse -Force -ErrorAction SilentlyContinue
+                      
+                      Write-Host "✅ $Description - 释放: $sizeBefore MB" -ForegroundColor Green
+                      return $sizeBefore
+                  } catch {
+                      Write-Host "⚠️  $Description - 清理失败: $($_.Exception.Message)" -ForegroundColor Yellow
+                  }
+              } else {
+                  Write-Host "➡️  $Description - 目录不存在" -ForegroundColor Gray
+              }
+              return 0
+          }
+          
+          Write-Host "正在进行清理操作..." -ForegroundColor Yellow
+          
+          # 清理各种缓存目录
+          $freedSpace += Clean-Directory -Path "C:\Windows\Temp" -Description "系统临时文件"
+          $freedSpace += Clean-Directory -Path $env:TEMP -Description "用户临时文件"
+          $freedSpace += Clean-Directory -Path "$env:LOCALAPPDATA\Temp" -Description "应用临时文件"
+          $freedSpace += Clean-Directory -Path "$env:USERPROFILE\.nuget\packages" -Description "NuGet缓存"
           
           # 清理软件包缓存
           Write-Host "清理软件包缓存..." -ForegroundColor Yellow
-          Remove-Item -Path "$env:LOCALAPPDATA\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
-          
-          # 清理NuGet缓存
-          Write-Host "清理NuGet缓存..." -ForegroundColor Yellow
-          Remove-Item -Path "$env:USERPROFILE\.nuget\packages\*" -Recurse -Force -ErrorAction SilentlyContinue
+          winget list --accept-source-agreements 2>&1 | Out-Null
           
           # 运行磁盘清理
-          Write-Host "运行磁盘清理..." -ForegroundColor Yellow
-          Cleanmgr /sagerun:1 | Out-Null
+          Write-Host "运行系统磁盘清理..." -ForegroundColor Yellow
+          Start-Process -FilePath "cleanmgr" -ArgumentList "/sagerun:1" -Wait -WindowStyle Hidden
           
-          # 获取清理后空间
-          $after = Get-PSDrive C | Select-Object -ExpandProperty Free
-          $freedGB = [math]::Round(($after - $before)/1GB, 2)
+          $endSpace = (Get-PSDrive C).Free
+          $totalFreedGB = [math]::Round(($endSpace - $startSpace)/1GB, 2)
           
-          Write-Host "释放空间: $freedGB GB" -ForegroundColor Green
-          
-      - name: 设置RDP远程桌面
+          Write-Host ""
+          Write-Host "💾 总共释放空间: $totalFreedGB GB" -ForegroundColor Green
+          Write-Host ""
+
+      - name: 增强RDP配置
         run: |
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "设置RDP远程桌面" -ForegroundColor Cyan
+          Write-Host "🖥️ 增强RDP配置" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
           
-          # 设置用户密码
-          $password = ConvertTo-SecureString "${{ inputs.rdp_password }}" -AsPlainText -Force
-          $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name.Split('\')[1]
-          Set-LocalUser -Name $user -Password $password
-          
-          # 启用RDP
-          Write-Host "启用远程桌面..." -ForegroundColor Yellow
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0
-          
-          # 配置防火墙 - 修复显示组名称
-          Write-Host "配置防火墙..." -ForegroundColor Yellow
-          # 使用英文的显示组名称
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          # 同时添加端口规则作为备用
-          New-NetFirewallRule -DisplayName "RDP Port 3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
-          
-          # 重启RDP服务
-          Write-Host "重启RDP服务..." -ForegroundColor Yellow
-          Restart-Service -Name "TermService" -Force
-          Start-Service -Name "TermService"
-          
-          Write-Host "RDP设置完成！" -ForegroundColor Green
-          
-      - name: 获取连接信息
+          try {
+              # 1. 设置用户密码
+              Write-Host "1. 设置用户密码..." -ForegroundColor Yellow
+              $password = ConvertTo-SecureString "${{ inputs.rdp_password }}" -AsPlainText -Force
+              $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name.Split('\')[1]
+              
+              Set-LocalUser -Name $currentUser -Password $password -ErrorAction Stop
+              Write-Host "   ✅ 密码设置成功" -ForegroundColor Green
+              
+              # 2. 启用RDP服务
+              Write-Host "2. 配置远程桌面服务..." -ForegroundColor Yellow
+              Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -ErrorAction Stop
+              Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -ErrorAction Stop
+              
+              # 提高RDP连接限制
+              Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "MaxInstanceCount" -Value 2 -ErrorAction SilentlyContinue
+              
+              Write-Host "   ✅ RDP服务配置完成" -ForegroundColor Green
+              
+              # 3. 配置防火墙
+              Write-Host "3. 配置防火墙规则..." -ForegroundColor Yellow
+              
+              # 启用远程桌面防火墙组
+              Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+              
+              # 添加入站规则
+              $existingRule = Get-NetFirewallRule -DisplayName "GitHub-RDP-3389" -ErrorAction SilentlyContinue
+              if (-not $existingRule) {
+                  New-NetFirewallRule -DisplayName "GitHub-RDP-3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
+              }
+              
+              # 允许ICMP（ping）
+              New-NetFirewallRule -DisplayName "Allow-ICMP" -Protocol ICMPv4 -IcmpType 8 -Action Allow -ErrorAction SilentlyContinue
+              
+              Write-Host "   ✅ 防火墙配置完成" -ForegroundColor Green
+              
+              # 4. 重启并验证服务
+              Write-Host "4. 启动RDP服务..." -ForegroundColor Yellow
+              Restart-Service -Name "TermService" -Force -ErrorAction Stop
+              Start-Service -Name "TermService" -ErrorAction Stop
+              
+              # 等待服务启动
+              Start-Sleep -Seconds 3
+              
+              $serviceStatus = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
+              if ($serviceStatus.Status -eq "Running") {
+                  Write-Host "   ✅ RDP服务运行正常" -ForegroundColor Green
+              } else {
+                  Write-Host "   ⚠️  RDP服务状态异常: $($serviceStatus.Status)" -ForegroundColor Yellow
+              }
+              
+              Write-Host "✅ RDP配置完成！" -ForegroundColor Green
+              
+          } catch {
+              Write-Host "❌ RDP配置失败: $($_.Exception.Message)" -ForegroundColor Red
+              exit 1
+          }
+
+      - name: 网络诊断和连接信息
         run: |
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "远程连接信息" -ForegroundColor Cyan
+          Write-Host "🌐 网络诊断和连接信息" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
           
-          # 获取IP地址
-          $ipconfig = ipconfig
-          $ipv4 = $ipconfig | Select-String "IPv4" | ForEach-Object { ($_.ToString() -split ":")[1].Trim() }
+          # 获取网络信息
+          $networkInfo = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null }
+          $ipAddress = $networkInfo.IPv4Address.IPAddress
+          $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 5 -ErrorAction SilentlyContinue) || "无法获取"
           
-          Write-Host "🖥️  计算机名: $env:COMPUTERNAME" -ForegroundColor Yellow
-          Write-Host "🌐 IP地址: $ipv4" -ForegroundColor Yellow
-          Write-Host "🔑 用户名: $env:USERNAME" -ForegroundColor Yellow
-          Write-Host "🔒 密码: ${{ inputs.rdp_password }}" -ForegroundColor Red
-          Write-Host "🚪 端口: 3389" -ForegroundColor Yellow
-          Write-Host ""
-          Write-Host "📋 连接命令: mstsc /v:$ipv4" -ForegroundColor Green
-          Write-Host ""
-          Write-Host "⚠️  注意: GitHub Actions运行器的网络环境可能限制外部连接" -ForegroundColor Red
+          Write-Host "##[group]🖥️ 系统信息" -ForegroundColor Yellow
+          Write-Host "计算机名: $env:COMPUTERNAME" -ForegroundColor White
+          Write-Host "用户名: $env:USERNAME" -ForegroundColor White
+          Write-Host "运行时长: $env:WORKFLOW_DURATION 分钟" -ForegroundColor White
+          Write-Host "##[endgroup]"
           
+          Write-Host "##[group]🌐 网络信息" -ForegroundColor Yellow
+          Write-Host "内网IP: $ipAddress" -ForegroundColor White
+          Write-Host "公网IP: $publicIP" -ForegroundColor White
+          Write-Host "RDP端口: 3389" -ForegroundColor White
+          Write-Host "密码: ${{ inputs.rdp_password }}" -ForegroundColor Red
+          Write-Host "##[endgroup]"
+          
+          Write-Host "##[group]📋 连接指令" -ForegroundColor Yellow
+          Write-Host "Windows远程桌面: mstsc /v:$ipAddress" -ForegroundColor Green
+          Write-Host "macOS/Linux: 使用Microsoft Remote Desktop" -ForegroundColor Green
+          Write-Host "##[endgroup]"
+          
+          # 网络连通性测试
+          Write-Host "##[group]🔍 网络诊断" -ForegroundColor Yellow
+          try {
+              Test-NetConnection -ComputerName $ipAddress -Port 3389 -InformationLevel Quiet | Out-Null
+              Write-Host "✅ 本地RDP端口监听正常" -ForegroundColor Green
+          } catch {
+              Write-Host "❌ 本地RDP端口无法访问" -ForegroundColor Red
+          }
+          Write-Host "##[endgroup]"
+          
+          Write-Host ""
+          Write-Host "⚠️  重要提示:" -ForegroundColor Red
+          Write-Host "• GitHub Actions运行器可能位于NAT后，外部可能无法直接连接" -ForegroundColor Yellow
+          Write-Host "• 连接成功率取决于运行环境的网络配置" -ForegroundColor Yellow
+          Write-Host "• 工作流结束后实例将自动销毁" -ForegroundColor Yellow
+          Write-Host ""
+
       - name: 检出代码仓库
         uses: actions/checkout@v4
-        
-      - name: 显示系统状态
+        with:
+          sparse-checkout: |
+            start.ps1
+            start.bat
+            requirements.txt
+
+      - name: 应用环境准备
         run: |
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "✅ 平衡型优化完成" -ForegroundColor Cyan
+          Write-Host "🚀 应用环境准备" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host ""
-          Write-Host "📊 磁盘状态：" -ForegroundColor Yellow
-          Get-PSDrive C | Format-Table Name, 
-          @{Name="Used(GB)"; Expression={[math]::Round($_.Used/1GB,2)}}, 
-          @{Name="Free(GB)"; Expression={[math]::Round($_.Free/1GB,2)}}, 
-          @{Name="Total(GB)"; Expression={[math]::Round(($_.Used + $_.Free)/1GB,2)}}
           
-          Write-Host "🧠 内存信息：" -ForegroundColor Yellow
-          systeminfo | Select-String "Total Physical Memory", "Available Physical Memory"
-          
-          $freeGB = [math]::Round((Get-PSDrive C).Free/1GB, 2)
-          Write-Host "🎉 C盘可用空间: ${freeGB} GB" -ForegroundColor Green
-          
-      - name: 安装并启动应用
-        run: |
-          if (Test-Path "start.ps1") {
-            Write-Host "正在启动应用..." -ForegroundColor Yellow
-            PowerShell -ExecutionPolicy Bypass -File start.ps1
-          } elseif (Test-Path "start.bat") {
-            Write-Host "正在启动批处理应用..." -ForegroundColor Yellow
-            cmd /c start.bat
-          } else {
-            Write-Host "警告：未找到 start.ps1 或 start.bat 文件，跳过应用启动" -ForegroundColor Yellow
+          # 检查并安装应用依赖
+          if (Test-Path "requirements.txt") {
+              Write-Host "发现requirements.txt，安装Python依赖..." -ForegroundColor Yellow
+              pip install -r requirements.txt --user
           }
           
-      - name: 保持工作流运行
+          # 设置执行策略以允许脚本运行
+          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          
+          Write-Host "✅ 环境准备完成" -ForegroundColor Green
+
+      - name: 启动应用服务
         run: |
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "🚀 启动保活进程" -ForegroundColor Cyan
+          Write-Host "🚀 启动应用服务" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host ""
           
-          $durationMinutes = ${{ inputs.duration }}
-          $durationSeconds = $durationMinutes * 60
+          $startupScripts = @("start.ps1", "start.bat", "app.ps1", "main.py", "app.py", "server.py")
+          $scriptStarted = $false
           
-          Write-Host "⏱️  设置运行时长: $durationMinutes 分钟" -ForegroundColor Yellow
-          Write-Host "🖥️  RDP服务运行中..." -ForegroundColor Green
-          Write-Host ""
+          foreach ($script in $startupScripts) {
+              if (Test-Path $script) {
+                  Write-Host "发现启动脚本: $script" -ForegroundColor Yellow
+                  
+                  switch ($script) {
+                      { $_.EndsWith(".ps1") } {
+                          Write-Host "执行PowerShell脚本..." -ForegroundColor Green
+                          Start-Job -ScriptBlock { 
+                              param($scriptName)
+                              & ".\$scriptName"
+                          } -ArgumentList $script
+                          $scriptStarted = $true
+                      }
+                      { $_.EndsWith(".bat") } {
+                          Write-Host "执行批处理脚本..." -ForegroundColor Green
+                          Start-Process -FilePath "cmd.exe" -ArgumentList "/c $script" -WindowStyle Hidden
+                          $scriptStarted = $true
+                      }
+                      { $_.EndsWith(".py") } {
+                          Write-Host "执行Python脚本..." -ForegroundColor Green
+                          Start-Job -ScriptBlock { 
+                              param($scriptName)
+                              python $scriptName
+                          } -ArgumentList $script
+                          $scriptStarted = $true
+                      }
+                  }
+                  break
+              }
+          }
           
-          $startTime = Get-Date
-          $endTime = $startTime.AddMinutes($durationMinutes)
+          if (-not $scriptStarted) {
+              Write-Host "ℹ️  未找到启动脚本，跳过应用启动" -ForegroundColor Yellow
+          } else {
+              Write-Host "✅ 应用启动命令已发送" -ForegroundColor Green
+          }
+
+      - name: 系统监控和保活
+        run: |
+          Write-Host "=============================================" -ForegroundColor Cyan
+          Write-Host "⏰ 系统监控和保活" -ForegroundColor Cyan
+          Write-Host "=============================================" -ForegroundColor Cyan
+          
+          $duration = $env:WORKFLOW_DURATION
+          $endTime = (Get-Date).AddMinutes($duration)
+          $checkInterval = 30  # 检查间隔秒数
           $iteration = 0
           
-          while ($(Get-Date) -lt $endTime) {
-            $iteration++
-            $currentTime = Get-Date
-            $elapsed = $currentTime - $startTime
-            $remaining = $endTime - $currentTime
-            
-            Write-Host "运行中... 已运行: $([math]::Round($elapsed.TotalMinutes,1)) 分钟, 剩余: $([math]::Round($remaining.TotalMinutes,1)) 分钟, 迭代: $iteration"
-            
-            # 检查RDP服务状态
-            $rdpService = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
-            if ($rdpService.Status -ne "Running") {
-                Write-Host "重启RDP服务..." -ForegroundColor Yellow
-                Start-Service -Name "TermService" -ErrorAction SilentlyContinue
-            }
-            
-            Start-Sleep -Seconds 60
+          Write-Host "⏱️  总运行时长: $duration 分钟" -ForegroundColor Yellow
+          Write-Host "🕐 预计结束时间: $($endTime.ToString('HH:mm:ss'))" -ForegroundColor Yellow
+          Write-Host "🔍 检查间隔: $checkInterval 秒" -ForegroundColor Yellow
+          Write-Host ""
+          
+          function Get-SystemStatus {
+              $cpuUsage = (Get-Counter "\Processor(_Total)\% Processor Time" -ErrorAction SilentlyContinue).CounterSamples.CookedValue
+              $memory = Get-CimInstance Win32_OperatingSystem
+              $freeMemPercent = [math]::Round(($memory.FreePhysicalMemory / $memory.TotalVisibleMemorySize) * 100, 1)
+              $disk = Get-PSDrive C
+              $freeDiskPercent = [math]::Round(($disk.Free / ($disk.Used + $disk.Free)) * 100, 1)
+              
+              return @{
+                  CPU = if ($cpuUsage) { [math]::Round($cpuUsage, 1) } else { "N/A" }
+                  Memory = $freeMemPercent
+                  Disk = $freeDiskPercent
+              }
+          }
+          
+          while ((Get-Date) -lt $endTime) {
+              $iteration++
+              $remaining = $endTime - (Get-Date)
+              $remainingMinutes = [math]::Round($remaining.TotalMinutes, 1)
+              
+              # 每5次迭代显示一次详细状态
+              if ($iteration % 5 -eq 1) {
+                  $status = Get-SystemStatus
+                  Write-Host "##[group]📊 系统状态监控 (#$iteration)" -ForegroundColor Cyan
+                  Write-Host "剩余时间: $remainingMinutes 分钟" -ForegroundColor White
+                  Write-Host "CPU使用率: $($status.CPU)%" -ForegroundColor White
+                  Write-Host "内存可用: $($status.Memory)%" -ForegroundColor White
+                  Write-Host "磁盘可用: $($status.Disk)%" -ForegroundColor White
+                  Write-Host "##[endgroup]"
+                  
+                  # 检查RDP服务状态
+                  $rdpService = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
+                  if ($rdpService.Status -ne "Running") {
+                      Write-Host "⚠️  RDP服务异常，正在重启..." -ForegroundColor Yellow
+                      Start-Service -Name "TermService" -ErrorAction SilentlyContinue
+                  }
+              } else {
+                  Write-Host "运行中... 剩余: $remainingMinutes 分钟 (迭代: $iteration)" -ForegroundColor Gray
+              }
+              
+              Start-Sleep -Seconds $checkInterval
           }
           
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "⏰ 已达到设置的运行时长" -ForegroundColor Cyan
+          Write-Host "✅ 工作流执行完成" -ForegroundColor Cyan
           Write-Host "=============================================" -ForegroundColor Cyan
-          Write-Host "运行了 $durationMinutes 分钟，现在退出" -ForegroundColor Green
+          Write-Host "总运行时间: $duration 分钟" -ForegroundColor Green
+          Write-Host "总检查次数: $iteration 次" -ForegroundColor Green
+          Write-Host "实例即将自动销毁..." -ForegroundColor Yellow
+
+      - name: 清理和总结
+        if: always()
+        run: |
+          Write-Host "=============================================" -ForegroundColor Cyan
+          Write-Host "📊 运行总结" -ForegroundColor Cyan
+          Write-Host "=============================================" -ForegroundColor Cyan
+          
+          $finalStatus = Get-CimInstance Win32_OperatingSystem
+          $finalDisk = Get-PSDrive C
+          
+          $freeMemGB = [math]::Round($finalStatus.FreePhysicalMemory/1MB, 2)
+          $freeDiskGB = [math]::Round($finalDisk.Free/1GB, 2)
+          
+          Write-Host "最终系统状态:" -ForegroundColor Yellow
+          Write-Host "• 可用内存: $freeMemGB GB" -ForegroundColor White
+          Write-Host "• 可用磁盘: $freeDiskGB GB" -ForegroundColor White
+          Write-Host "• 运行时长: $env:WORKFLOW_DURATION 分钟" -ForegroundColor White
+          Write-Host ""
+          Write-Host "🎯 工作流执行完成！" -ForegroundColor Green
