@@ -79,9 +79,11 @@ jobs:
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0
           
-          # 配置防火墙
+          # 配置防火墙 - 修复显示组名称
           Write-Host "配置防火墙..." -ForegroundColor Yellow
-          Enable-NetFirewallRule -DisplayGroup "远程桌面"
+          # 使用英文的显示组名称
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          # 同时添加端口规则作为备用
           New-NetFirewallRule -DisplayName "RDP Port 3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
           
           # 重启RDP服务
