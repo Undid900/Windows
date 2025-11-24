@@ -16,11 +16,10 @@ on:
 jobs:
   build:
     runs-on: windows-2022
-    # 取消工作流超时限制
-    # timeout-minutes: 120  # 已移除时间限制
     
     steps:
       - name: Initial System State
+        continue-on-error: true
         run: |
           Write-Host "============================================="
           Write-Host "Initial System State"
@@ -34,7 +33,6 @@ jobs:
           
           Write-Host "`nCPU Information:"
           Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-Table
-        error-action: continue
 
       - name: Validate Input Parameters
         run: |
@@ -54,8 +52,8 @@ jobs:
           
           $valid = $true
           foreach ($req in $passwordRequirements) {
-              if (-not & $req.Test) {
-                  Write-Error "❌ Password validation failed: $($req.Name)"
+              if (-not (& $req.Test)) {
+                  Write-Error "❌❌ Password validation failed: $($req.Name)"
                   $valid = $false
               } else {
                   Write-Host "✅ $($req.Name)"
@@ -63,19 +61,18 @@ jobs:
           }
           
           if (-not $valid) {
-              Write-Error "❌ Password does not meet complexity requirements"
+              Write-Error "❌❌ Password does not meet complexity requirements"
               exit 1
           }
           
           # Validate port number
           $rdpPort = "${{ inputs.rdp_port }}"
-          if (-not ($rdpPort -match '^\d+$') -or $rdpPort -lt 1 -or $rdpPort -gt 65535) {
-              Write-Error "❌ Invalid port number: $rdpPort"
+          if (-not ($rdpPort -match '^\d+$') -or [int]$rdpPort -lt 1 -or [int]$rdpPort -gt 65535) {
+              Write-Error "❌❌ Invalid port number: $rdpPort"
               exit 1
           }
           
           Write-Host "`n✅ All parameters validated successfully"
-        error-action: stop
 
       - name: Configure Remote Desktop Access
         run: |
@@ -105,7 +102,7 @@ jobs:
                   Add-LocalGroupMember -Group "Remote Desktop Users" -Member $userName -ErrorAction Stop
                   Write-Host "✅ User $userName added to Remote Desktop Users group"
               } else {
-                  Write-Host "ℹ️  User $userName already exists, updating password"
+                  Write-Host "ℹℹ️  User $userName already exists, updating password"
                   $securePassword = ConvertTo-SecureString $rdpPassword -AsPlainText -Force
                   Set-LocalUser -Name $userName -Password $securePassword -ErrorAction Stop
               }
@@ -159,7 +156,7 @@ jobs:
               Write-Host "`n============================================="
               Write-Host "✅ Remote Desktop Configuration Complete"
               Write-Host "============================================="
-              Write-Host "`n📋 RDP Connection Details:"
+              Write-Host "`n📋📋 RDP Connection Details:"
               Write-Host "   Computer: $publicIp`:$rdpPort"
               Write-Host "   Username: $env:COMPUTERNAME\$userName"
               Write-Host "   Password: [The password you provided]"
@@ -167,16 +164,16 @@ jobs:
               Write-Host "============================================="
               
           } catch {
-              Write-Error "❌ RDP configuration failed: $_"
+              Write-Error "❌❌ RDP configuration failed: $_"
               # Clean up on failure
               if (Get-LocalUser -Name "GitHubActionsUser" -ErrorAction SilentlyContinue) {
                   Remove-LocalUser -Name "GitHubActionsUser" -Force -ErrorAction SilentlyContinue
               }
               exit 1
           }
-        error-action: stop
 
       - name: Clean Up System Space
+        continue-on-error: true
         run: |
           Write-Host "============================================="
           Write-Host "Cleaning Up System Space"
@@ -202,38 +199,24 @@ jobs:
                           $sizeMB = if ($size) { [math]::Round($size/1MB, 2) } else { 0 }
                           Write-Host "Removing $name ($sizeMB MB)..."
                           
-                          # Use robocopy for more reliable deletion
-                          robocopy /MIR "$path" "$env:TEMP\empty_dir" /NFL /NDL /NJH /NJS /NP /R:3 /W:1 | Out-Null
-                          Remove-Item $path -Recurse -Force -ErrorAction Stop
+                          # Use more reliable deletion method
+                          Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
                           Write-Host "✅ Removed $name"
                       } catch {
                           Write-Warning "⚠️  Failed to remove $name : $_"
                       }
                   } else {
-                      Write-Host "ℹ️  Skipping $name (not found)"
+                      Write-Host "ℹℹ️  Skipping $name (not found)"
                   }
               }
               
-              # Create empty directory for robocopy
-              $emptyDir = "$env:TEMP\empty_dir"
-              if (-not (Test-Path $emptyDir)) {
-                  New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
-              }
-              
-              # Clean up Windows components with better methods
+              # Clean up Windows components
               Write-Host "`nCleaning up Windows components..."
               
-              # Clean Windows Update cache with safer method
+              # Clean Windows Update cache
               Write-Host "Cleaning Windows Update cache..."
               try {
-                  # Use built-in cleanup instead of stopping service
-                  Get-CimInstance -ClassName Win32_Service -Filter "Name='wuauserv'" | 
-                  Invoke-CimMethod -MethodName StopService -Arguments @{Timeout=5000} -ErrorAction SilentlyContinue
-                  
                   Remove-Directory -path "C:\Windows\SoftwareDistribution\Download\*" -name "Windows Update cache"
-                  
-                  Get-CimInstance -ClassName Win32_Service -Filter "Name='wuauserv'" | 
-                  Invoke-CimMethod -MethodName StartService -ErrorAction SilentlyContinue
               } catch {
                   Write-Warning "⚠️  Windows Update cache cleanup failed: $_"
               }
@@ -246,56 +229,10 @@ jobs:
               # Clean Recycle Bin
               Write-Host "Cleaning Recycle Bin..."
               try {
-                  Clear-RecycleBin -Force -ErrorAction Stop
+                  Clear-RecycleBin -Force -ErrorAction SilentlyContinue
                   Write-Host "✅ Recycle Bin cleaned"
               } catch {
                   Write-Warning "⚠️  Recycle Bin cleanup failed: $_"
-              }
-              
-              # Remove unnecessary applications using better method
-              Write-Host "`nRemoving unnecessary applications..."
-              
-              # List of applications to remove (display names)
-              $appsToRemove = @(
-                  "Microsoft Edge",
-                  "Google Chrome",
-                  "Mozilla Firefox",
-                  "Git",
-                  "Python",
-                  "Node.js",
-                  "Docker",
-                  "Visual Studio Code",
-                  "7-Zip",
-                  "WinRAR"
-              )
-              
-              foreach ($app in $appsToRemove) {
-                  try {
-                      # Use Get-Package for better package management
-                      $packages = Get-Package -Name "*$app*" -ErrorAction SilentlyContinue
-                      if ($packages) {
-                          foreach ($package in $packages) {
-                              Write-Host "Uninstalling $($package.Name)..."
-                              $package | Uninstall-Package -Force -ErrorAction Stop
-                              Write-Host "✅ Uninstalled $($package.Name)"
-                          }
-                      } else {
-                          Write-Host "ℹ️  $app not found"
-                      }
-                  } catch {
-                      Write-Warning "⚠️  Failed to uninstall $app : $_"
-                  }
-              }
-              
-              # Clean up Windows Store apps with filtering
-              Write-Host "`nCleaning up Windows Store apps..."
-              try {
-                  Get-AppxPackage -AllUsers | 
-                  Where-Object { $_.Name -notlike "*Microsoft*" -and $_.Name -notlike "*Windows*" -and $_.NonRemovable -ne $true } | 
-                  Remove-AppxPackage -ErrorAction SilentlyContinue
-                  Write-Host "✅ Windows Store apps cleaned up"
-              } catch {
-                  Write-Warning "⚠️  Windows Store apps cleanup failed: $_"
               }
               
               # Clean up system files with DISM
@@ -305,11 +242,6 @@ jobs:
                   Write-Host "✅ System cleanup completed"
               } catch {
                   Write-Warning "⚠️  System cleanup failed: $_"
-              }
-              
-              # Remove empty directory
-              if (Test-Path $emptyDir) {
-                  Remove-Item $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
               }
               
               $afterFreeSpace = (Get-PSDrive $drive).FreeSpace
@@ -324,22 +256,21 @@ jobs:
               Write-Host "============================================="
               
           } catch {
-              Write-Error "❌ Cleanup failed: $_"
-              # Continue even if cleanup has errors
+              Write-Error "❌❌ Cleanup failed: $_"
           }
-        error-action: continue
 
       - name: Check Out Code Repository
         uses: actions/checkout@v4
         continue-on-error: true
 
       - name: Display Optimization Results
+        continue-on-error: true
         run: |
           Write-Host "============================================="
           Write-Host "✅ System Optimization Complete"
           Write-Host "============================================="
           
-          Write-Host "`n📊 System Status:"
+          Write-Host "`n📊📊 System Status:"
           Write-Host "------------------------"
           
           # Display storage information
@@ -357,9 +288,9 @@ jobs:
           Write-Host "Cores: $($cpuInfo.NumberOfCores)"
           
           Write-Host "`n============================================="
-        error-action: continue
 
       - name: Install and Launch Application
+        continue-on-error: true
         run: |
           Write-Host "============================================="
           Write-Host "Installing and Launching Application"
@@ -382,20 +313,19 @@ jobs:
           } catch {
               Write-Warning "⚠️  Application launch failed: $_"
           }
-        error-action: continue
 
       - name: Keep Workflow Running Indefinitely
         run: |
           Write-Host "============================================="
-          Write-Host "🚀 Starting Unlimited Keep-Alive Process"
+          Write-Host "🚀🚀 Starting Unlimited Keep-Alive Process"
           Write-Host "============================================="
           
           try {
               $startTime = Get-Date
               
-              Write-Host "`n⏱️  Session Type: UNLIMITED (No time restriction)"
-              Write-Host "📅 Start Time: $($startTime.ToString('yyyy-MM-dd HH:mm:ss'))"
-              Write-Host "🔄 Session will run until manually stopped"
+              Write-Host "`n⏱⏱⏱️  Session Type: UNLIMITED (No time restriction)"
+              Write-Host "📅📅 Start Time: $($startTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+              Write-Host "🔄🔄 Session will run until manually stopped"
               
               # Get RDP connection details again for convenience
               $maxRetries = 3
@@ -416,10 +346,10 @@ jobs:
                   $publicIp = "Unknown"
               }
               
-              $rdpPort = ${{ inputs.rdp_port }}
+              $rdpPort = "${{ inputs.rdp_port }}"
               $userName = "GitHubActionsUser"
               
-              Write-Host "`n📋 RDP Connection Details:"
+              Write-Host "`n📋📋 RDP Connection Details:"
               Write-Host "------------------------"
               Write-Host "Computer: $publicIp`:$rdpPort"
               Write-Host "Username: $env:COMPUTERNAME\$userName"
@@ -440,13 +370,13 @@ jobs:
                   $notificationInterval = New-TimeSpan -Hours 1
                   if (($currentTime - $lastNotificationTime) -ge $notificationInterval) {
                       $elapsedHours = [math]::Round($elapsed, 2)
-                      Write-Host "`n🔄 Session active for $elapsedHours hours (unlimited)"
+                      Write-Host "`n🔄🔄 Session active for $elapsedHours hours (unlimited)"
                       
-                      # Check RDP connections with better method
+                      # Check RDP connections
                       try {
-                          $rdpSessions = qwinsta.exe 2>&1 | Select-String -Pattern "$userName"
+                          $rdpSessions = qwinsta 2>&1 | Select-String -Pattern "$userName"
                           if ($rdpSessions) {
-                              Write-Host "👤 Active RDP connection detected"
+                              Write-Host "👤👤 Active RDP connection detected"
                           } else {
                               Write-Host "⚠️  No active RDP connections"
                           }
@@ -459,23 +389,23 @@ jobs:
                   
                   # Also display status on first iteration
                   if ($iteration -eq 1) {
-                      Write-Host "`n🔄 Session started successfully"
+                      Write-Host "`n🔄🔄 Session started successfully"
                   }
                   
                   # Sleep for 5 minutes between checks
                   Start-Sleep -Seconds 300
               }
           } catch {
-              Write-Error "❌ Keep-alive process failed: $_"
+              Write-Error "❌❌ Keep-alive process failed: $_"
               exit 1
           }
-        error-action: stop
 
       - name: Clean Up After Session
         if: always()
+        continue-on-error: true
         run: |
           Write-Host "============================================="
-          Write-Host "🧹 Cleaning Up After Session"
+          Write-Host "🧹🧹 Cleaning Up After Session"
           Write-Host "============================================="
           
           try {
@@ -503,7 +433,5 @@ jobs:
               
               Write-Host "`n✅ Cleanup completed successfully"
           } catch {
-              Write-Error "❌ Cleanup failed: $_"
-              # Continue even if cleanup has errors
+              Write-Error "❌❌ Cleanup failed: $_"
           }
-        error-action: continue
