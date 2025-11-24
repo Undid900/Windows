@@ -199,7 +199,7 @@ jobs:
                           $sizeMB = if ($size) { [math]::Round($size/1MB, 2) } else { 0 }
                           Write-Host "Removing $name ($sizeMB MB)..."
                           
-                          # Use more reliable deletion method
+                          # Use simpler deletion method
                           Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
                           Write-Host "✅ Removed $name"
                       } catch {
@@ -346,6 +346,7 @@ jobs:
                   $publicIp = "Unknown"
               }
               
+              # 修复：添加引号
               $rdpPort = "${{ inputs.rdp_port }}"
               $userName = "GitHubActionsUser"
               
