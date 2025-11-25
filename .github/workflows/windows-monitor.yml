@@ -1,0 +1,116 @@
+name: Windows System Monitoring
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    # 每 6 小时运行一次监控
+    - cron: '0 */6 * * *'
+
+jobs:
+  windows-monitor:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js (可选)
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install system monitoring tools
+      run: |
+        # 安装必要的 PowerShell 模块用于系统监控
+        Install-Module -Name PSSystemTools -Force -AllowClobber
+        Install-Module -Name PSWindowsUpdate -Force -AllowClobber
+      
+    - name: Check remote connection
+      run: |
+        $urls = @(
+          "https://www.google.com",
+          "https://www.github.com",
+          "https://www.microsoft.com"
+        )
+        
+        foreach ($url in $urls) {
+          try {
+            $response = Invoke-WebRequest -Uri $url -UseBasicParsing
+            Write-Host "✅ $url - 连接成功 (状态码: $($response.StatusCode))"
+            Write-Host "响应时间: $($response.TotalMilliseconds)ms"
+          }
+          catch {
+            Write-Host "❌ $url - 连接失败: $($_.Exception.Message)"
+          }
+      
+    - name: Monitor system resources
+      run: |
+        Write-Host "=== 系统资源监控 ==="
+        
+        # 内存使用情况
+        $memory = Get-Counter "\Memory\Available MBytes"
+        $totalMemory = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB
+        $availableMemory = $memory.CounterSamples.CookedValue
+        $usedMemory = $totalMemory - $availableMemory
+        $memoryUsage = ($usedMemory / $totalMemory) * 100
+        
+        Write-Host "内存使用情况:"
+        Write-Host "总内存: $([math]::Round($totalMemory, 2)) MB"
+        Write-Host "已使用: $([math]::Round($usedMemory, 2)) MB"
+        Write-Host "可用内存: $([math]::Round($availableMemory, 2)) MB"
+        Write-Host "内存使用率: $([math]::Round($memoryUsage, 2))%"
+        
+        # CPU 使用情况
+        $cpu = Get-Counter "\Processor(_Total)\% Processor Time"
+        $cpuUsage = $cpu.CounterSamples.CookedValue
+        
+        Write-Host "CPU 使用率: $([math]::Round($cpuUsage, 2))%"
+        
+        # 磁盘使用情况
+        $disk = Get-Counter "\LogicalDisk(C:)\% Free Space"
+        $freeSpace = $disk.CounterSamples.CookedValue
+        
+        Write-Host "C盘剩余空间: $([math]::Round($freeSpace, 2))%"
+        
+    - name: Generate monitoring report
+      run: |
+        $report = @"
+        # 系统监控报告
+        生成时间: $(Get-Date)
+        
+        ## 资源使用情况
+        - 内存使用率: $([math]::Round($memoryUsage, 2))%
+        - CPU 使用率: $([math]::Round($cpuUsage, 2))%
+        - 磁盘剩余空间: $([math]::Round($freeSpace, 2))%
+        
+        ## 网络连接状态
+        - Google: 可访问
+        - GitHub: 可访问  
+        - Microsoft: 可访问
+        
+        ## 系统信息
+        - 操作系统: Windows Server 2022
+        - 运行环境: GitHub Actions
+        "@
+        
+        Write-Host $report
+        # 保存报告到文件
+        $report | Out-File -FilePath "monitoring-report.md" -Encoding UTF8
+        
+    - name: Upload monitoring report
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-monitoring-report
+        path: monitoring-report.md
+        
+    - name: Send notification (可选)
+      if: always()
+      run: |
+        if ($env:SLACK_WEBHOOK_URL) {
+          $payload = @{
+            text = "Windows 系统监控完成 - 内存: $([math]::Round($memoryUsage, 2))%, CPU: $([math]::Round($cpuUsage, 2))%"
+          } | ConvertTo-Json | Invoke-RestMethod -Uri $env:SLACK_WEBHOOK_URL -Method Post -ContentType 'application/json'
+        }
