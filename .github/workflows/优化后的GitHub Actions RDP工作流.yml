@@ -1,0 +1,744 @@
+name: Optimized Windows RDP with Enhanced Features
+
+on:
+  workflow_dispatch:
+    inputs:
+      rdp_password:
+        description: 'Remote Desktop Password (min 8 chars, must include uppercase, lowercase, number, and special character)'
+        required: true
+        type: string
+      rdp_port:
+        description: 'Remote Desktop Port (default: 3389)'
+        required: false
+        default: '3389'
+        type: string
+      exe_url:
+        description: 'URL of EXE file to download and run (optional)'
+        required: false
+        default: ''
+        type: string
+      storage_repo:
+        description: 'GitHub repository for persistent storage (format: username/repo)'
+        required: false
+        default: ''
+        type: string
+      storage_token:
+        description: 'GitHub Personal Access Token with repo scope (for storage)'
+        required: false
+        default: ''
+        type: string
+      session_timeout:
+        description: 'Session timeout in hours (default: 6, max: 24)'
+        required: false
+        default: '6'
+        type: string
+
+jobs:
+  optimized-windows-rdp:
+    runs-on: windows-2022
+    timeout-minutes: ${{ fromJSON(inputs.session_timeout) * 60 }}  # Dynamic timeout based on input
+    
+    env:
+      # Environment variables for better code organization
+      RDP_USER: "GitHubActionsUser"
+      STORAGE_DIR: "C:\\PersistentStorage"
+      STORAGE_REPO_DIR: "C:\\PersistentStorage\\repo"
+      EXE_DOWNLOAD_PATH: "$env:TEMP\\app.exe"
+      MAX_RETRIES: 3
+      RETRY_DELAY: 2
+      STORAGE_SYNC_INTERVAL: 30  # minutes
+      STATUS_CHECK_INTERVAL: 15  # minutes
+
+    steps:
+      - name: 🚨 Critical Security Disclaimer
+        run: |
+          Write-Host "============================================="
+          Write-Host "⚠️  SECURITY WARNING: FOR LEARNING ONLY"
+          Write-Host "============================================="
+          Write-Host "• This workflow is for EDUCATIONAL PURPOSES ONLY"
+          Write-Host "• Do NOT use for production or sensitive data"
+          Write-Host "• Always use strong, unique passwords"
+          Write-Host "• Never store credentials in plain text"
+          Write-Host "• Comply with GitHub Terms of Service"
+          Write-Host "• Terminate sessions when not in use"
+          Write-Host "============================================="
+        error-action: continue
+
+      - name: 📋 Enhanced Parameter Validation
+        run: |
+          Write-Host "============================================="
+          Write-Host "Validating Input Parameters"
+          Write-Host "============================================="
+          
+          # Helper function for validation
+          function Test-Parameter {
+              param(
+                  [string]$Name,
+                  [scriptblock]$Test,
+                  [string]$FailureMessage
+              )
+              if (-not & $Test) {
+                  Write-Error "❌ $FailureMessage"
+                  return $false
+              }
+              Write-Host "✅ $Name validation passed"
+              return $true
+          }
+          
+          $allValid = $true
+          
+          # Password complexity validation
+          $rdpPassword = "${{ inputs.rdp_password }}"
+          $passwordTests = @(
+              @{ Name = "Password length (min 8 chars)"; 
+                 Test = { $rdpPassword.Length -ge 8 }; 
+                 Failure = "Password must be at least 8 characters long" },
+              @{ Name = "Uppercase letter"; 
+                 Test = { $rdpPassword -match '[A-Z]' }; 
+                 Failure = "Password must contain at least one uppercase letter" },
+              @{ Name = "Lowercase letter"; 
+                 Test = { $rdpPassword -match '[a-z]' }; 
+                 Failure = "Password must contain at least one lowercase letter" },
+              @{ Name = "Number"; 
+                 Test = { $rdpPassword -match '[0-9]' }; 
+                 Failure = "Password must contain at least one number" },
+              @{ Name = "Special character"; 
+                 Test = { $rdpPassword -match '[^a-zA-Z0-9]' }; 
+                 Failure = "Password must contain at least one special character" }
+          )
+          
+          Write-Host "`n🔒 Password complexity checks:"
+          foreach ($test in $passwordTests) {
+              if (-not (Test-Parameter -Name $test.Name -Test $test.Test -FailureMessage $test.Failure)) {
+                  $allValid = $false
+              }
+          }
+          
+          # Port validation
+          $rdpPort = "${{ inputs.rdp_port }}"
+          if (-not (Test-Parameter -Name "Port number" `
+                                 -Test { $rdpPort -match '^\d+$' -and $rdpPort -ge 1 -and $rdpPort -le 65535 } `
+                                 -FailureMessage "Invalid port number: $rdpPort (must be 1-65535)")) {
+              $allValid = $false
+          }
+          
+          # Session timeout validation
+          $sessionTimeout = [int]"${{ inputs.session_timeout }}"
+          if (-not (Test-Parameter -Name "Session timeout" `
+                                 -Test { $sessionTimeout -ge 1 -and $sessionTimeout -le 24 } `
+                                 -FailureMessage "Session timeout must be between 1-24 hours")) {
+              $allValid = $false
+          }
+          
+          # Storage parameters validation
+          $storageRepo = "${{ inputs.storage_repo }}"
+          $storageToken = "${{ inputs.storage_token }}"
+          
+          if (($storageRepo -ne "" -and $storageToken -eq "") -or ($storageRepo -eq "" -and $storageToken -ne "")) {
+              Write-Error "❌ Both storage_repo and storage_token must be provided together"
+              $allValid = $false
+          }
+          
+          if (-not $allValid) {
+              Write-Error "`n❌ Parameter validation failed. Please check your inputs and try again."
+              exit 1
+          }
+          
+          Write-Host "`n✅ All parameters validated successfully"
+        error-action: stop
+
+      - name: 🖥️ Secure RDP Configuration
+        run: |
+          Write-Host "============================================="
+          Write-Host "Configuring Secure Remote Desktop"
+          Write-Host "============================================="
+          
+          try {
+              $rdpPassword = "${{ inputs.rdp_password }}"
+              $rdpPort = "${{ inputs.rdp_port }}"
+              $userName = $env:RDP_USER
+              
+              # Create or update RDP user with enhanced security
+              $securePassword = ConvertTo-SecureString $rdpPassword -AsPlainText -Force
+              
+              if (-not (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue)) {
+                  Write-Host "`n👤 Creating new RDP user: $userName"
+                  New-LocalUser -Name $userName `
+                                -Password $securePassword `
+                                -FullName "GitHub Actions Secure User" `
+                                -Description "Temporary user for secure RDP access (auto-deleted)" `
+                                -AccountNeverExpires `
+                                -UserMayNotChangePassword `
+                                -PasswordNeverExpires `
+                                -ErrorAction Stop
+                  
+                  Write-Host "✅ User created with security hardening"
+              } else {
+                  Write-Host "`n👤 Updating existing user password"
+                  Set-LocalUser -Name $userName -Password $securePassword -ErrorAction Stop
+                  Write-Host "✅ User password updated"
+              }
+              
+              # Add user to Remote Desktop Users group
+              if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member $userName -ErrorAction SilentlyContinue)) {
+                  Add-LocalGroupMember -Group "Remote Desktop Users" -Member $userName -ErrorAction Stop
+                  Write-Host "✅ User added to Remote Desktop Users group"
+              }
+              
+              # Enable and secure Remote Desktop
+              Write-Host "`n🔒 Enabling secure Remote Desktop"
+              
+              # Enable RDP with NLA (Network Level Authentication)
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                              -Name "fDenyTSConnections" -Value 0 -ErrorAction Stop
+              
+              # Configure RDP security settings
+              $rdpSettings = @{
+                  "UserAuthentication" = 1  # Require user authentication
+                  "SecurityLayer" = 2       # TLS security layer
+                  "MinEncryptionLevel" = 2  # High encryption
+                  "MaxConnectionTime" = 0   # No time limit for connections
+              }
+              
+              foreach ($setting in $rdpSettings.GetEnumerator()) {
+                  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                                  -Name $setting.Name `
+                                  -Value $setting.Value `
+                                  -ErrorAction SilentlyContinue
+              }
+              
+              Write-Host "✅ RDP security settings configured"
+              
+              # Configure Windows Firewall with advanced rules
+              Write-Host "`n🔥 Configuring advanced firewall rules"
+              
+              # Remove existing RDP rules
+              Get-NetFirewallRule -DisplayName "Allow RDP*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+              
+              # Create new secure firewall rule
+              $firewallRule = New-NetFirewallRule -DisplayName "Allow RDP (Secure)" `
+                                                 -Direction Inbound `
+                                                 -Protocol TCP `
+                                                 -LocalPort $rdpPort `
+                                                 -Action Allow `
+                                                 -RemoteAddress Any `
+                                                 -Profile Private, Domain `
+                                                 -Enabled True `
+                                                 -ErrorAction Stop
+              
+              Write-Host "✅ Firewall rule created: $($firewallRule.DisplayName)"
+              
+              # Get public IP with enhanced retry logic
+              Write-Host "`n🌐 Retrieving public IP address"
+              
+              $publicIp = $null
+              $retryCount = 0
+              $maxRetries = [int]$env:MAX_RETRIES
+              $retryDelay = [int]$env:RETRY_DELAY
+              
+              while ($retryCount -lt $maxRetries -and -not $publicIp) {
+                  try {
+                      $publicIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 10 -ErrorAction Stop).ip
+                  } catch {
+                      $retryCount++
+                      Write-Warning "⚠️  IP retrieval attempt $retryCount/$maxRetries failed: $_"
+                      if ($retryCount -lt $maxRetries) {
+                          Start-Sleep -Seconds $retryDelay
+                      }
+                  }
+              }
+              
+              if (-not $publicIp) {
+                  $publicIp = "Unknown"
+                  Write-Warning "⚠️  Could not determine public IP address"
+              }
+              
+              # Display connection details with security warnings
+              Write-Host "`n============================================="
+              Write-Host "✅ RDP Configuration Complete - SECURE MODE"
+              Write-Host "============================================="
+              Write-Host "`n📋 SECURE RDP Connection Details:"
+              Write-Host "   Computer: $publicIp`:$rdpPort"
+              Write-Host "   Username: $env:COMPUTERNAME\$userName"
+              Write-Host "   Password: [The secure password you provided]"
+              Write-Host "`n🔒 SECURITY NOTES:"
+              Write-Host "   • This connection uses TLS encryption"
+              Write-Host "   • Network Level Authentication is required"
+              Write-Host "   • High encryption level is enforced"
+              Write-Host "   • Session will auto-terminate after ${{ inputs.session_timeout }} hours"
+              Write-Host "============================================="
+              
+          } catch {
+              Write-Error "❌ RDP configuration failed: $_"
+              
+              # Cleanup on failure
+              if (Get-LocalUser -Name $env:RDP_USER -ErrorAction SilentlyContinue) {
+                  Remove-LocalUser -Name $env:RDP_USER -Force -ErrorAction SilentlyContinue
+                  Write-Host "⚠️  Cleaned up failed user account"
+              }
+              
+              exit 1
+          }
+        error-action: stop
+
+      - name: 📥 Smart EXE Execution
+        if: ${{ inputs.exe_url != '' }}
+        run: |
+          Write-Host "============================================="
+          Write-Host "Smart EXE Download and Execution"
+          Write-Host "============================================="
+          
+          try {
+              $exeUrl = "${{ inputs.exe_url }}"
+              $exePath = $env:EXE_DOWNLOAD_PATH
+              
+              # Validate URL format
+              if (-not ($exeUrl -match '^https?://')) {
+                  Write-Error "❌ Invalid URL format: $exeUrl"
+                  exit 0  # Continue workflow even if EXE fails
+              }
+              
+              Write-Host "`n📥 Downloading EXE from: $exeUrl"
+              
+              # Download with progress and timeout
+              $downloadParams = @{
+                  Uri = $exeUrl
+                  OutFile = $exePath
+                  TimeoutSec = 300
+                  UseBasicParsing = $true
+                  ErrorAction = "Stop"
+              }
+              
+              Invoke-WebRequest @downloadParams
+              
+              if (Test-Path $exePath) {
+                  Write-Host "✅ EXE downloaded successfully"
+                  
+                  # Verify file size
+                  $fileSize = (Get-Item $exePath).Length
+                  if ($fileSize -eq 0) {
+                      Write-Warning "⚠️  Downloaded file is empty"
+                      exit 0
+                  }
+                  
+                  Write-Host "📊 File size: $([math]::Round($fileSize/1MB, 2)) MB"
+                  
+                  # Check file type (basic check)
+                  $fileHeader = Get-Content $exePath -TotalCount 4 -Encoding Byte
+                  if (-not ($fileHeader[0] -eq 0x4D -and $fileHeader[1] -eq 0x5A)) {
+                      Write-Warning "⚠️  File does not appear to be a valid EXE (missing MZ header)"
+                      exit 0
+                  }
+                  
+                  Write-Host "`n▶️  Executing EXE file..."
+                  
+                  # Run EXE with enhanced error handling
+                  $processParams = @{
+                      FilePath = $exePath
+                      NoNewWindow = $true
+                      PassThru = $true
+                      ErrorAction = "Stop"
+                  }
+                  
+                  $process = Start-Process @processParams
+                  Write-Host "✅ EXE started with PID: $($process.Id)"
+                  
+                  # Monitor process briefly
+                  Start-Sleep -Seconds 10
+                  
+                  if (-not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) {
+                      Write-Warning "⚠️  EXE process terminated unexpectedly"
+                  } else {
+                      Write-Host "✅ EXE is running successfully"
+                  }
+                  
+              } else {
+                  Write-Error "❌ Failed to download EXE file"
+              }
+          } catch {
+              Write-Warning "⚠️  EXE operation failed: $_"
+              # Continue workflow even if EXE fails
+          }
+        error-action: continue
+
+      - name: 💾 Advanced Persistent Storage
+        if: ${{ inputs.storage_repo != '' && inputs.storage_token != '' }}
+        run: |
+          Write-Host "============================================="
+          Write-Host "Advanced Persistent Storage Initialization"
+          Write-Host "============================================="
+          
+          try {
+              $storageRepo = "${{ inputs.storage_repo }}"
+              $storageToken = "${{ inputs.storage_token }}"
+              $storageDir = $env:STORAGE_DIR
+              $repoPath = $env:STORAGE_REPO_DIR
+              
+              # Create storage directory structure
+              if (-not (Test-Path $storageDir)) {
+                  New-Item -ItemType Directory -Path $storageDir -Force | Out-Null
+                  Write-Host "📁 Created main storage directory: $storageDir"
+              }
+              
+              # Create common directories
+              $commonDirs = @("Documents", "Downloads", "Projects", "Backups")
+              foreach ($dir in $commonDirs) {
+                  $fullPath = Join-Path $storageDir $dir
+                  if (-not (Test-Path $fullPath)) {
+                      New-Item -ItemType Directory -Path $fullPath -Force | Out-Null
+                      Write-Host "📁 Created: $fullPath"
+                  }
+              }
+              
+              # Configure Git with security
+              $env:GIT_REDIRECT_STDERR = '2>&1'
+              
+              # Set Git credentials (temporarily)
+              git config --global credential.helper store
+              Add-Content -Path "$env:USERPROFILE\.git-credentials" -Value "https://$storageToken@github.com" -Force
+              
+              # Set user identity
+              git config --global user.name "GitHub Actions Storage"
+              git config --global user.email "storage@github.actions"
+              
+              # Clone or update repository
+              if (-not (Test-Path $repoPath)) {
+                  Write-Host "`n🔄 Cloning storage repository: $storageRepo"
+                  git clone "https://github.com/$storageRepo.git" $repoPath
+                  Write-Host "✅ Repository cloned successfully"
+              } else {
+                  Write-Host "`n🔄 Updating existing repository"
+                  Set-Location $repoPath
+                  git pull
+                  Write-Host "✅ Repository updated successfully"
+              }
+              
+              # Create symlinks for easier access
+              Write-Host "`n🔗 Creating convenience symlinks"
+              
+              # Link storage to user profile
+              $userProfile = $env:USERPROFILE
+              $linkPaths = @(
+                  @{ Source = "$storageDir\Documents"; Target = "$userProfile\Documents\Persistent" },
+                  @{ Source = "$storageDir\Downloads"; Target = "$userProfile\Downloads\Persistent" },
+                  @{ Source = "$storageDir\Projects"; Target = "$userProfile\Projects" }
+              )
+              
+              foreach ($link in $linkPaths) {
+                  if (-not (Test-Path $link.Target)) {
+                      New-Item -ItemType SymbolicLink -Path $link.Target -Value $link.Source -Force | Out-Null
+                      Write-Host "✅ Created symlink: $($link.Target) -> $($link.Source)"
+                  }
+              }
+              
+              Write-Host "`n✅ Advanced storage initialization complete"
+              Write-Host "📂 Storage is available at: $storageDir"
+              Write-Host "🔄 Auto-sync enabled every $($env:STORAGE_SYNC_INTERVAL) minutes"
+              
+          } catch {
+              Write-Warning "⚠️  Storage initialization failed: $_"
+              # Continue workflow even if storage fails
+          }
+        error-action: continue
+
+      - name: ⏳ Intelligent Session Manager
+        run: |
+          Write-Host "============================================="
+          Write-Host "Intelligent Session Management"
+          Write-Host "============================================="
+          
+          try {
+              $startTime = Get-Date
+              $userName = $env:RDP_USER
+              $rdpPort = "${{ inputs.rdp_port }}"
+              $sessionTimeout = [int]"${{ inputs.session_timeout }}"
+              $maxSessionTime = $startTime.AddHours($sessionTimeout)
+              
+              $storageRepo = "${{ inputs.storage_repo }}"
+              $storageToken = "${{ inputs.storage_token }}"
+              $storageDir = $env:STORAGE_REPO_DIR
+              
+              $storageSyncInterval = [int]$env:STORAGE_SYNC_INTERVAL
+              $statusCheckInterval = [int]$env:STATUS_CHECK_INTERVAL
+              
+              # Get public IP with retry
+              $publicIp = $null
+              $retryCount = 0
+              $maxRetries = [int]$env:MAX_RETRIES
+              $retryDelay = [int]$env:RETRY_DELAY
+              
+              while ($retryCount -lt $maxRetries -and -not $publicIp) {
+                  try {
+                      $publicIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 10).ip
+                  } catch {
+                      $retryCount++
+                      Write-Warning "⚠️  IP retrieval attempt $retryCount/$maxRetries failed"
+                      if ($retryCount -lt $maxRetries) {
+                          Start-Sleep -Seconds $retryDelay
+                      }
+                  }
+              }
+              
+              if (-not $publicIp) {
+                  $publicIp = "Unknown"
+              }
+              
+              # Display connection details with enhanced information
+              Write-Host "`n📋 ENHANCED RDP Connection Details:"
+              Write-Host "------------------------"
+              Write-Host "Computer: $publicIp`:$rdpPort"
+              Write-Host "Username: $env:COMPUTERNAME\$userName"
+              Write-Host "Password: [Your secure password]"
+              Write-Host "`n⏱️  Session Information:"
+              Write-Host "Start Time: $($startTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+              Write-Host "Timeout: $sessionTimeout hours"
+              Write-Host "Auto-End: $($maxSessionTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+              Write-Host "`n🔧 Usage Tips:"
+              Write-Host "• Use Microsoft Remote Desktop app for best experience"
+              Write-Host "• Persistent storage: $($env:STORAGE_DIR)"
+              Write-Host "• Auto-sync every $storageSyncInterval minutes"
+              Write-Host "• Status checks every $statusCheckInterval minutes"
+              Write-Host "`n⚠️  SECURITY REMINDER:"
+              Write-Host "This session is for LEARNING PURPOSES ONLY"
+              
+              # Initialize session variables
+              $lastStorageSync = Get-Date
+              $iteration = 0
+              $sessionActive = $true
+              
+              # Main session loop with intelligent management
+              while ($sessionActive) {
+                  $iteration++
+                  $currentTime = Get-Date
+                  $elapsed = ($currentTime - $startTime).TotalHours
+                  $remaining = ($maxSessionTime - $currentTime).TotalMinutes
+                  
+                  # Check for session timeout
+                  if ($currentTime -ge $maxSessionTime) {
+                      Write-Host "`n⏰ Session timeout reached after $([math]::Round($elapsed, 2)) hours"
+                      $sessionActive = $false
+                      break
+                  }
+                  
+                  # Status reporting
+                  $statusInterval = [int]($statusCheckInterval * 60 / 300)  # Convert minutes to 5-minute iterations
+                  if ($iteration % $statusInterval -eq 0 -or $iteration -eq 1) {
+                      $elapsedHours = [math]::Round($elapsed, 2)
+                      $remainingMinutes = [math]::Round($remaining)
+                      
+                      Write-Host "`n============================================="
+                      Write-Host "🔄 Session Status - $($currentTime.ToString('HH:mm:ss'))"
+                      Write-Host "============================================="
+                      Write-Host "• Active for: $elapsedHours hours"
+                      Write-Host "• Remaining: $remainingMinutes minutes"
+                      Write-Host "• Total allowed: $sessionTimeout hours"
+                      
+                      # Check RDP connections with enhanced detection
+                      try {
+                          $rdpSessions = qwinsta.exe 2>&1 | Select-String -Pattern "$userName"
+                          if ($rdpSessions) {
+                              $sessionCount = ($rdpSessions | Measure-Object).Count
+                              Write-Host "• Active RDP connections: $sessionCount"
+                          } else {
+                              Write-Host "• Active RDP connections: 0 (idle)"
+                          }
+                      } catch {
+                          Write-Warning "⚠️  RDP session check failed: $_"
+                      }
+                      
+                      # System resource monitoring
+                      try {
+                          $memory = Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory
+                          $freeMemoryGB = [math]::Round($memory.FreePhysicalMemory / 1MB, 2)
+                          Write-Host "• Free memory: $freeMemoryGB GB"
+                          
+                          $disk = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -eq 'C:\' }
+                          $freeDiskGB = [math]::Round($disk.FreeSpace / 1GB, 2)
+                          Write-Host "• Free disk space: $freeDiskGB GB"
+                      } catch {
+                          Write-Warning "⚠️  Resource monitoring failed: $_"
+                      }
+                      
+                      Write-Host "============================================="
+                  }
+                  
+                  # Intelligent storage sync
+                  if ($storageRepo -ne '' -and $storageToken -ne '' -and (Test-Path $storageDir)) {
+                      $syncDue = ($currentTime - $lastStorageSync).TotalMinutes -ge $storageSyncInterval
+                      $lowDiskSpace = $false
+                      
+                      # Check disk space before sync
+                      try {
+                          $disk = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -eq 'C:\' }
+                          $freeDiskGB = [math]::Round($disk.FreeSpace / 1GB, 2)
+                          $lowDiskSpace = $freeDiskGB -lt 5  # Less than 5GB free
+                      } catch {
+                          # Continue even if disk check fails
+                      }
+                      
+                      if ($syncDue -and -not $lowDiskSpace) {
+                          Write-Host "`n🔄 Starting intelligent storage sync..."
+                          
+                          try {
+                              $env:GIT_REDIRECT_STDERR = '2>&1'
+                              
+                              Set-Location $storageDir
+                              
+                              # Check for changes before committing
+                              $changes = git status --porcelain
+                              if ($changes) {
+                                  Write-Host "📝 Detected changes to sync"
+                                  
+                                  git add .
+                                  $commitMessage = "Auto-sync: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | Session: $([math]::Round($elapsed, 2))h"
+                                  git commit -m $commitMessage
+                                  git push
+                                  
+                                  Write-Host "✅ Storage synced successfully"
+                                  $lastStorageSync = $currentTime
+                              } else {
+                                  Write-Host "ℹ️  No changes to sync"
+                              }
+                              
+                          } catch {
+                              Write-Warning "⚠️  Storage sync failed: $_"
+                          }
+                      } elseif ($lowDiskSpace) {
+                          Write-Warning "⚠️  Low disk space detected - skipping sync"
+                      }
+                  }
+                  
+                  # Critical low disk space warning
+                  if ($lowDiskSpace) {
+                      Write-Host "`n🚨 CRITICAL: Low disk space detected!"
+                      Write-Host "🚨 Please free up space or terminate the session"
+                  }
+                  
+                  # Sleep for 5 minutes
+                  Start-Sleep -Seconds 300
+              }
+              
+              Write-Host "`n============================================="
+              Write-Host "🔚 Session Management Complete"
+              Write-Host "============================================="
+              Write-Host "• Total session time: $([math]::Round($elapsed, 2)) hours"
+              Write-Host "• Status checks performed: $iteration"
+              Write-Host "============================================="
+              
+          } catch {
+              Write-Error "❌ Session management failed: $_"
+              exit 1
+          }
+        error-action: stop
+
+      - name: 🧹 Secure Final Cleanup
+        if: always()
+        run: |
+          Write-Host "============================================="
+          Write-Host "Secure Final Cleanup"
+          Write-Host "============================================="
+          
+          try {
+              $userName = $env:RDP_USER
+              $storageRepo = "${{ inputs.storage_repo }}"
+              $storageToken = "${{ inputs.storage_token }}"
+              $storageDir = $env:STORAGE_REPO_DIR
+              
+              Write-Host "`n🔄 Performing final cleanup operations"
+              
+              # Final storage sync with priority
+              if ($storageRepo -ne '' -and $storageToken -ne '' -and (Test-Path $storageDir)) {
+                  Write-Host "`n💾 Final storage sync (priority operation)..."
+                  
+                  try {
+                      $env:GIT_REDIRECT_STDERR = '2>&1'
+                      
+                      Set-Location $storageDir
+                      
+                      # Check for changes
+                      $changes = git status --porcelain
+                      if ($changes) {
+                          git add .
+                          $commitMessage = "Final sync: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | Session completed"
+                          git commit -m $commitMessage
+                          git push
+                          
+                          Write-Host "✅ Final storage sync completed successfully"
+                      } else {
+                          Write-Host "ℹ️  No changes for final sync"
+                      }
+                      
+                  } catch {
+                      Write-Warning "⚠️  Final storage sync failed: $_"
+                      Write-Warning "⚠️  Important: Some data may not have been saved!"
+                  }
+              }
+              
+              # Cleanup Git credentials (critical security step)
+              if (Test-Path "$env:USERPROFILE\.git-credentials") {
+                  Remove-Item "$env:USERPROFILE\.git-credentials" -Force -ErrorAction SilentlyContinue
+                  Write-Host "🔒 Git credentials securely removed"
+              }
+              
+              # Remove RDP user account
+              if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) {
+                  Write-Host "`n👤 Removing RDP user: $userName"
+                  Remove-LocalUser -Name $userName -Force -ErrorAction Stop
+                  Write-Host "✅ RDP user account deleted"
+              }
+              
+              # Disable Remote Desktop
+              Write-Host "`n🛡️  Disabling Remote Desktop"
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                              -Name "fDenyTSConnections" -Value 1 -ErrorAction Stop
+              Write-Host "✅ Remote Desktop disabled"
+              
+              # Remove firewall rules
+              Write-Host "`n🔥 Removing RDP firewall rules"
+              $firewallRules = Get-NetFirewallRule -DisplayName "Allow RDP*" -ErrorAction SilentlyContinue
+              if ($firewallRules) {
+                  $firewallRules | Remove-NetFirewallRule -ErrorAction Stop
+                  Write-Host "✅ Firewall rules removed: $($firewallRules.Count)"
+              } else {
+                  Write-Host "ℹ️  No RDP firewall rules found"
+              }
+              
+              # Cleanup symlinks
+              Write-Host "`n🔗 Cleaning up symlinks"
+              $userProfile = $env:USERPROFILE
+              $symlinks = @(
+                  "$userProfile\Documents\Persistent",
+                  "$userProfile\Downloads\Persistent",
+                  "$userProfile\Projects"
+              )
+              
+              foreach ($link in $symlinks) {
+                  if (Test-Path $link) {
+                      Remove-Item $link -Force -ErrorAction SilentlyContinue
+                  }
+              }
+              Write-Host "✅ Symlinks cleaned up"
+              
+              # Secure temp file cleanup
+              Write-Host "`n🗑️  Cleaning up temporary files"
+              if (Test-Path $env:EXE_DOWNLOAD_PATH) {
+                  Remove-Item $env:EXE_DOWNLOAD_PATH -Force -ErrorAction SilentlyContinue
+                  Write-Host "✅ EXE download file removed"
+              }
+              
+              Write-Host "`n============================================="
+              Write-Host "✅ Secure Cleanup Completed Successfully"
+              Write-Host "============================================="
+              Write-Host "• All RDP configurations removed"
+              Write-Host "• User account deleted"
+              Write-Host "• Firewall rules cleaned up"
+              Write-Host "• Credentials securely erased"
+              Write-Host "`n⚠️  Final Security Note:"
+              Write-Host "Remember to change passwords if used elsewhere"
+              Write-Host "============================================="
+              
+          } catch {
+              Write-Error "❌ Cleanup failed: $_"
+              Write-Error "❌ WARNING: Manual cleanup may be required!"
+          }
+        error-action: continue
